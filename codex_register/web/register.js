@@ -9,6 +9,8 @@ let smsCountryFilter = "";
 let successSummaryCache = null;
 let registerPasswordCache = "";
 let taskStatusFilter = "all";
+let agentSummaryCache = null;
+let registerBatchesCache = [];
 
 const SMS_COUNTRY_FALLBACK = [
   {code: 33, nameZh: "哥伦比亚", nameEn: "Colombia"},
@@ -123,6 +125,60 @@ function successTextFileForTask(task) {
   return task.tokenOut.replace(/[\\/][^\\/]+$/, `${slash}pool_phones.txt`);
 }
 
+function renderAgentDashboard(summary, batches) {
+  agentSummaryCache = summary || null;
+  registerBatchesCache = batches || [];
+  if (!$("#agent-dashboard")) return;
+
+  const register = summary?.register || {};
+  const at = summary?.at || {};
+  const oa = summary?.oa || {};
+  const plus = summary?.plus || {};
+  $("#agent-register-running").textContent = `${Number(register.running || 0)} / ${Number(register.queued || 0)}`;
+  $("#agent-register-success-today").textContent = String(Number(register.successToday || 0));
+  $("#agent-at-plus").textContent = `${Number(at.usableForPlus || 0)} / ${Number(at.total || 0)}`;
+  $("#agent-oa-emails").textContent = String(Number(oa.availableEmails || 0));
+  $("#agent-plus-otp").textContent = String(Number(plus.otpPending || 0));
+
+  const wrap = $("#batch-list");
+  if (!wrap) return;
+  wrap.innerHTML = registerBatchesCache.length
+    ? registerBatchesCache.slice(0, 8).map((batch) => {
+        const target = batch.targetSuccess ? `\u76ee\u6807 ${batch.success || 0}/${batch.targetSuccess}` : `${batch.success || 0} \u6210\u529f`;
+        const statusClass = batch.targetReached ? "success" : batch.done ? "done" : "running";
+        return `
+          <div class="batch-item ${statusClass}">
+            <div class="batch-main">
+              <strong class="mono">${escapeHtml(batch.batchId || "legacy")}</strong>
+              <span>${escapeHtml(target)} &middot; ${Number(batch.failed || 0)} \u5931\u8d25 &middot; ${Number(batch.running || 0)} \u8fd0\u884c &middot; ${Number(batch.queued || 0)} \u6392\u961f</span>
+            </div>
+            <div class="batch-actions">
+              <small>${batch.done ? "\u5df2\u7ed3\u675f" : "\u8fdb\u884c\u4e2d"}</small>
+              <button class="small" type="button" data-batch-filter="${escapeHtml(batch.batchId || "legacy")}">\u770b\u4efb\u52a1</button>
+            </div>
+          </div>
+        `;
+      }).join("")
+    : `<div class="empty compact">\u8fd8\u6ca1\u6709\u6279\u6b21\u6570\u636e</div>`;
+
+  document.querySelectorAll("[data-batch-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const batchId = button.dataset.batchFilter;
+      taskStatusFilter = "all";
+      renderTable(batchId);
+      toast(`\u5df2\u7b5b\u9009\u6279\u6b21 ${batchId}`);
+    });
+  });
+}
+
+async function loadAgentDashboard() {
+  const [summary, batchData] = await Promise.all([
+    api("/api/summary"),
+    api("/api/register/batches"),
+  ]);
+  renderAgentDashboard(summary, batchData.batches || []);
+}
+
 function renderSuccessSummary(data) {
   successSummaryCache = data || null;
   const card = $("#success-summary");
@@ -158,6 +214,37 @@ async function loadSuccessSummary() {
   renderSuccessSummary(data);
 }
 
+function formatSmsBalance(item) {
+  const value = Number(item.balance);
+  if (!Number.isFinite(value)) return "-";
+  const currency = item.currency || "USD";
+  const prefix = currency === "USD" ? "$" : `${currency} `;
+  return `${prefix}${value.toFixed(4)}`;
+}
+
+function renderSmsBalances(data) {
+  const wrap = $("#sms-balance-bar");
+  if (!wrap) return;
+  const items = data?.items || [];
+  wrap.innerHTML = items.length
+    ? items.map((item) => {
+        const label = escapeHtml(item.providerLabel || item.provider || "SMS");
+        const title = escapeHtml(item.ok ? `${item.providerLabel || item.provider || "SMS"} 余额` : (item.error || "余额读取失败"));
+        return `
+          <div class="sms-balance-card ${item.ok ? "" : "error"}" title="${title}">
+            <span>${label}</span>
+            <strong>${item.ok ? escapeHtml(formatSmsBalance(item)) : "读取失败"}</strong>
+          </div>
+        `;
+      }).join("")
+    : "";
+}
+
+async function loadSmsBalances() {
+  const data = await api("/api/sms/balances");
+  renderSmsBalances(data);
+}
+
 function taskRow(task) {
   const token = task.accessTokenPreview
     ? `<span class="mono token-pill">${escapeHtml(task.accessTokenPreview)}</span>`
@@ -183,6 +270,7 @@ function taskRow(task) {
       <td>${badge(task.status)}</td>
       <td>
         <div class="task-main mono">${escapeHtml(taskName(task))}</div>
+        ${task.batchId ? `<div class="task-note"><span class="mono">batch: ${escapeHtml(task.batchId)}</span></div>` : ""}
         ${note}
         ${successNote}
       </td>
@@ -192,9 +280,18 @@ function taskRow(task) {
         <div>创建 ${fmtTime(task.createdAt)}</div>
         <div class="muted">更新 ${fmtTime(task.updatedAt)}</div>
       </td>
-      <td><div class="row actions">${open}${cancel}${del}</div></td>
+      <td><div class="row actions">${open}${diagnosis}${cancel}${del}</div></td>
     </tr>
   `;
+}
+
+function renderDiagnosis(task, diagnosis) {
+  selectedTaskId = task?.id || diagnosis?.id || "";
+  $("#modal-title").textContent = `\u4efb\u52a1\u8bca\u65ad - ${task ? taskName(task) : diagnosis?.id || ""}`;
+  $("#modal-subtitle").textContent = `${diagnosis?.status || task?.status || ""} / ${diagnosis?.errorType || "\u65e0\u9519\u8bef\u7c7b\u578b"}`;
+  $("#logs").textContent = JSON.stringify(diagnosis, null, 2);
+  $("#log-modal").classList.remove("hidden");
+  $("#logs").scrollTop = 0;
 }
 
 function renderLogs(task) {
@@ -310,6 +407,16 @@ function bindTableActions() {
     });
   });
 
+  document.querySelectorAll("[data-diagnosis]").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const task = tasksCache.find((item) => item.id === btn.dataset.diagnosis);
+      const data = await api(`/api/tasks/${btn.dataset.diagnosis}/diagnosis`);
+      renderDiagnosis(task, data.diagnosis);
+      renderTable();
+    });
+  });
+
   document.querySelectorAll("[data-cancel]").forEach((btn) => {
     btn.addEventListener("click", async (event) => {
       event.stopPropagation();
@@ -339,8 +446,10 @@ function taskMatchesFilter(task) {
   return task.status === taskStatusFilter;
 }
 
-function filteredTasks() {
-  return tasksCache.filter(taskMatchesFilter);
+function filteredTasks(batchId = "") {
+  return tasksCache
+    .filter(taskMatchesFilter)
+    .filter((task) => !batchId || (task.batchId || "legacy") === batchId);
 }
 
 function updateTaskFilterCounts() {
@@ -360,8 +469,8 @@ function updateTaskFilterCounts() {
   });
 }
 
-function renderTable() {
-  const visibleTasks = filteredTasks();
+function renderTable(batchId = "") {
+  const visibleTasks = filteredTasks(batchId);
   $("#tasks").innerHTML = visibleTasks.length
     ? visibleTasks.map(taskRow).join("")
     : `<tr><td colspan="6"><div class="empty">当前筛选下暂无任务</div></td></tr>`;
@@ -391,8 +500,10 @@ async function bulkDeleteTasks(mode) {
   const label = mode === "failed" ? "失败任务" : "失败/取消任务";
   const ok = window.confirm(`确认删除 ${targets.length} 个${label}？\n\n此操作会删除任务记录和对应日志，不会删除已导出的成功 txt 或 AT 文件。`);
   if (!ok) return;
-  const params = new URLSearchParams({status: statuses.join(",")});
-  const result = await api(`/api/register/tasks?${params.toString()}`, {method: "DELETE"});
+  const result = await api("/api/register/tasks/cleanup", {
+    method: "POST",
+    body: JSON.stringify({status: statuses, dryRun: false}),
+  });
   if (selectedTaskId && targets.some((task) => task.id === selectedTaskId)) {
     selectedTaskId = "";
     closeModal();
@@ -407,6 +518,7 @@ async function loadTasks() {
   $("#summary").textContent = `运行 ${data.running} / 排队 ${data.queued} / 并发 ${data.concurrency}`;
   renderTable();
   await loadSuccessSummary().catch(() => undefined);
+  await loadAgentDashboard().catch(() => undefined);
 
   if (!$("#log-modal").classList.contains("hidden") && selectedTaskId) {
     const selected = tasksCache.find((task) => task.id === selectedTaskId);
@@ -708,6 +820,7 @@ async function saveSettings(event) {
   });
   configCache = data;
   renderConfig(data);
+  await loadSmsBalances().catch(() => undefined);
   toast("SMS 接码配置已保存，新注册任务会使用新配置");
   closeSettingsModal();
 }
@@ -744,6 +857,39 @@ async function saveDefaultProxy(proxyUrl) {
   toast(proxyUrl && proxyUrl.toLowerCase() !== "direct" ? "默认代理已保存" : "默认代理已清空，当前直连");
 }
 
+async function startAutoRegister(event) {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const body = Object.fromEntries(form.entries());
+  body.targetSuccess = Number(body.targetSuccess || 10);
+  body.maxAttempts = Number(body.maxAttempts || Math.max(body.targetSuccess * 2, body.targetSuccess));
+  body.count = Number(body.count || body.targetSuccess);
+  body.concurrency = Number(body.concurrency || 10);
+  const data = await api("/api/register/auto", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  toast(`\u81ea\u52a8\u8865\u4f4d\u5df2\u5f00\u542f\uff1a${data.batchId}`);
+  await loadTasks();
+}
+
+async function cleanupFailedTasks(dryRun) {
+  const result = await api("/api/register/tasks/cleanup", {
+    method: "POST",
+    body: JSON.stringify({status: "failed", dryRun}),
+  });
+  if (dryRun) {
+    toast(`\u53ef\u6e05\u7406\u5931\u8d25\u4efb\u52a1 ${result.matched || 0} \u4e2a`);
+    return;
+  }
+  toast(`\u5df2\u6e05\u7406\u5931\u8d25\u4efb\u52a1 ${result.deleted || 0} \u4e2a`);
+  if (selectedTaskId && (result.ids || []).includes(selectedTaskId)) {
+    selectedTaskId = "";
+    closeModal();
+  }
+  await loadTasks();
+}
+
 $("#start-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -758,9 +904,16 @@ $("#start-form").addEventListener("submit", async (event) => {
   await loadTasks();
 });
 
+$("#auto-register-form").addEventListener("submit", (event) => startAutoRegister(event).catch((error) => toast(error.message)));
 $("#refresh").addEventListener("click", () => loadTasks().catch((error) => toast(error.message)));
 $("#delete-failed").addEventListener("click", () => bulkDeleteTasks("failed").catch((error) => toast(error.message)));
 $("#delete-finished").addEventListener("click", () => bulkDeleteTasks("finished").catch((error) => toast(error.message)));
+$("#cleanup-failed-dryrun").addEventListener("click", () => cleanupFailedTasks(true).catch((error) => toast(error.message)));
+$("#cleanup-failed-now").addEventListener("click", async () => {
+  const ok = window.confirm("\u786e\u8ba4\u6e05\u7406\u6240\u6709\u5931\u8d25\u6ce8\u518c\u4efb\u52a1\uff1f\u4f1a\u5220\u9664\u4efb\u52a1\u8bb0\u5f55\u548c\u65e5\u5fd7\uff0c\u4e0d\u5f71\u54cd\u6210\u529f\u7ed3\u679c\u6587\u4ef6\u3002");
+  if (!ok) return;
+  await cleanupFailedTasks(false).catch((error) => toast(error.message));
+});
 $("#copy-success-path").addEventListener("click", () => copySuccessPath().catch((error) => toast(error.message)));
 $("#export-success").addEventListener("click", exportSuccessFile);
 document.querySelectorAll("[data-task-filter]").forEach((button) => {
@@ -811,5 +964,6 @@ document.addEventListener("keydown", (event) => {
   closePasswordModal();
 });
 
-Promise.all([loadTasks(), loadConfig(), loadSuccessSummary()]).catch((error) => toast(error.message));
+Promise.all([loadTasks(), loadConfig(), loadSuccessSummary(), loadSmsBalances(), loadAgentDashboard()]).catch((error) => toast(error.message));
 setInterval(() => loadTasks().catch(() => undefined), 3000);
+setInterval(() => loadSmsBalances().catch(() => undefined), 60000);

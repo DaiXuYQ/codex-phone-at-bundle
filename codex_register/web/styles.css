@@ -130,6 +130,36 @@ a:hover {
   color: var(--muted);
 }
 
+.sms-balance-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 9px;
+  min-width: 118px;
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 5px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sms-balance-card strong {
+  color: var(--success);
+  font-size: 14px;
+}
+
+.sms-balance-card.error {
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.sms-balance-card.empty {
+  border-color: var(--border);
+  background: var(--surface-2);
+}
+
 .eyebrow {
   margin-bottom: 8px;
   color: var(--primary);
@@ -694,25 +724,21 @@ pre,
 
 .success-summary-main {
   display: grid;
-  grid-template-columns: auto auto auto auto minmax(220px, 1fr);
+  grid-template-columns: auto auto auto minmax(118px, max-content) minmax(330px, 1fr);
   gap: 10px;
   min-width: 0;
   flex: 1;
 }
 
 .summary-pill,
-.summary-filter-card,
-.success-path {
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--surface);
-  padding: 8px 10px;
+.summary-balance-list {
+  display: flex;
+  align-items: stretch;
+  gap: 5px;
+  min-width: 118px;
 }
 
-.summary-pill span,
-.summary-filter-card span,
-.success-path span,
-.success-path small {
+.summary-pill span {
   display: block;
   color: var(--muted);
   font-size: 11px;
@@ -726,43 +752,23 @@ pre,
   line-height: 1;
 }
 
-.success-path {
-  min-width: 0;
-}
-
-.success-path code {
-  display: block;
-  overflow: hidden;
-  margin-top: 2px;
-  color: var(--text);
-  font-family: "IBM Plex Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.summary-filter-card {
-  min-width: 330px;
-}
-
 .task-filter {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  margin-top: 4px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  background: var(--surface-2);
+  background: var(--surface);
   padding: 2px;
 }
 
 .task-filter button {
-  min-height: 26px;
+  min-height: 27px;
   border: 0;
   border-radius: 999px;
   background: transparent;
   box-shadow: none;
-  padding: 4px 10px;
+  padding: 5px 10px;
   color: var(--muted);
   font-size: 12px;
 }
@@ -783,6 +789,37 @@ pre,
 
 .success-actions {
   justify-content: flex-end;
+}
+
+.task-list-hint {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.success-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.success-inline code {
+  display: inline-block;
+  max-width: 310px;
+  overflow: hidden;
+  color: var(--text);
+  font-family: "IBM Plex Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+.success-inline small {
+  color: var(--muted);
+  white-space: nowrap;
 }
 
 .app:has(.register-layout) {
@@ -1823,6 +1860,139 @@ pre,
   }
 
   .country-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Agent-visible register improvements */
+.agent-register-box {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 18px;
+}
+
+.card-title-row.compact {
+  margin-bottom: 8px;
+}
+
+.card-title-row.compact h3,
+.batch-panel h3 {
+  margin: 0 0 4px;
+}
+
+.agent-dashboard {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.agent-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.agent-stat {
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-2);
+  padding: 10px 12px;
+}
+
+.agent-stat span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agent-stat strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.batch-panel {
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--surface-2) 78%, transparent);
+  padding: 12px;
+}
+
+.compact-head {
+  margin-bottom: 10px;
+}
+
+.batch-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.batch-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 10px;
+}
+
+.batch-item.running {
+  border-left-color: var(--warn);
+}
+
+.batch-item.success {
+  border-left-color: var(--success);
+}
+
+.batch-item.done {
+  border-left-color: var(--blue);
+}
+
+.batch-main {
+  min-width: 0;
+}
+
+.batch-main strong,
+.batch-main span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.batch-main span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.batch-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.batch-actions small {
+  color: var(--muted);
+}
+
+.empty.compact {
+  padding: 10px;
+}
+
+@media (max-width: 1100px) {
+  .agent-summary-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+
+  .batch-item {
     grid-template-columns: 1fr;
   }
 }

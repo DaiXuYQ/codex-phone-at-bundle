@@ -69,13 +69,40 @@
           </div>
           <button class="primary wide" type="submit">开启注册</button>
         </form>
+
+        <div class="agent-register-box">
+          <div class="card-title-row compact">
+            <div>
+              <h3>&#33258;&#21160;&#34917;&#20301;&#27880;&#20876;</h3>
+              <p class="muted">&#30446;&#26631;&#25104;&#21151; N &#20010;&#65292;&#22833;&#36133;&#21518;&#33258;&#21160;&#34917;&#20219;&#21153;&#65292;&#30452;&#21040;&#36798;&#21040;&#30446;&#26631;&#25110;&#26368;&#22823;&#23581;&#35797;&#25968;&#12290;</p>
+            </div>
+          </div>
+          <form id="auto-register-form">
+            <div class="split">
+              <div class="field"><label for="auto-target-success">&#30446;&#26631;&#25104;&#21151;</label><input id="auto-target-success" name="targetSuccess" type="number" min="1" max="100" value="10"></div>
+              <div class="field"><label for="auto-max-attempts">&#26368;&#22810;&#23581;&#35797;</label><input id="auto-max-attempts" name="maxAttempts" type="number" min="1" max="300" value="30"></div>
+            </div>
+            <div class="split">
+              <div class="field"><label for="auto-initial-count">&#39318;&#25209;&#25968;&#37327;</label><input id="auto-initial-count" name="count" type="number" min="1" max="100" value="10"></div>
+              <div class="field"><label for="auto-concurrency">&#24182;&#21457;</label><input id="auto-concurrency" name="concurrency" type="number" min="1" max="10" value="10"></div>
+            </div>
+            <button class="primary wide" type="submit">&#24320;&#21551;&#33258;&#21160;&#34917;&#20301;</button>
+          </form>
+        </div>
       </aside>
 
       <section class="card list-card">
         <div class="section-head">
           <div>
             <h2>注册任务列表</h2>
-            <p class="muted">任务名会在取到号码后变成：号码_provider_唯一标识。</p>
+            <p class="muted task-list-hint">
+              <span>任务名会在取到号码后变成：号码_provider_唯一标识。</span>
+              <span class="success-inline">
+                成功结果 txt：
+                <code id="success-file-path">加载中...</code>
+                <small id="success-task-count">-</small>
+              </span>
+            </p>
           </div>
           <div class="row">
             <span id="summary" class="badge">加载中</span>
@@ -98,8 +125,8 @@
               <span>接码成本</span>
               <strong id="sms-cost-total">$0.0000</strong>
             </div>
-            <div class="summary-filter-card">
-              <span>查看列表</span>
+            <div id="sms-balance-bar" class="summary-balance-list" aria-live="polite"></div>
+            <div class="summary-filter-inline">
               <div id="task-status-filter" class="task-filter" role="tablist" aria-label="任务状态筛选">
                 <button class="active" type="button" data-task-filter="all">全部 <b>0</b></button>
                 <button type="button" data-task-filter="running">运行中 <b>0</b></button>
@@ -107,15 +134,32 @@
                 <button type="button" data-task-filter="success">成功 <b>0</b></button>
               </div>
             </div>
-            <div class="success-path">
-              <span>成功结果 txt</span>
-              <code id="success-file-path">加载中...</code>
-              <small id="success-task-count">-</small>
-            </div>
           </div>
           <div class="row success-actions">
             <button id="copy-success-path" class="small" type="button" disabled>复制路径</button>
             <button id="export-success" class="primary small" type="button" disabled>导出成功 txt</button>
+          </div>
+        </div>
+        <div id="agent-dashboard" class="agent-dashboard">
+          <div class="agent-summary-grid">
+            <div class="agent-stat"><span>&#27880;&#20876;&#36816;&#34892;</span><strong id="agent-register-running">-</strong></div>
+            <div class="agent-stat"><span>&#20170;&#26085;&#25104;&#21151;</span><strong id="agent-register-success-today">-</strong></div>
+            <div class="agent-stat"><span>AT &#21487; Plus</span><strong id="agent-at-plus">-</strong></div>
+            <div class="agent-stat"><span>OA &#21487;&#29992;&#37038;&#31665;</span><strong id="agent-oa-emails">-</strong></div>
+            <div class="agent-stat"><span>Plus OTP</span><strong id="agent-plus-otp">-</strong></div>
+          </div>
+          <div class="batch-panel">
+            <div class="section-head compact-head">
+              <div>
+                <h3>&#27880;&#20876;&#25209;&#27425;</h3>
+                <p class="muted">&#27599;&#27425;&#24320;&#21551;&#27880;&#20876;&#20250;&#29983;&#25104;&#19968;&#20010; batchId&#65307;&#33258;&#21160;&#34917;&#20301;&#20063;&#20250;&#24402;&#21040;&#21516;&#19968;&#25209;&#27425;&#12290;</p>
+              </div>
+              <div class="row">
+                <button id="cleanup-failed-dryrun" class="small" type="button">&#39044;&#35272;&#28165;&#29702;&#22833;&#36133;</button>
+                <button id="cleanup-failed-now" class="danger small" type="button">&#28165;&#29702;&#22833;&#36133;</button>
+              </div>
+            </div>
+            <div id="batch-list" class="batch-list"></div>
           </div>
         </div>
         <div class="table-wrap clean">
