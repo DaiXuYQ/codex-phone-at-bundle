@@ -20,6 +20,9 @@ interface RegisterTask {
     kind: TaskKind;
     status: TaskStatus;
     title: string;
+    batchId?: string;
+    autoTargetSuccess?: number;
+    autoMaxAttempts?: number;
     createdAt: string;
     updatedAt: string;
     startedAt?: string;
@@ -49,6 +52,8 @@ interface RegisterTask {
     accessTokenPreview?: string;
     successTextFile?: string;
     error?: string;
+    errorType?: string;
+    errorSuggestion?: string;
     logs: string[];
 }
 
@@ -86,6 +91,8 @@ interface OaEmailStatusRecord {
     sub2apiAccount?: string;
     accessTokenHash?: string;
     error?: string;
+    failureType?: string;
+    retryable?: boolean;
     note?: string;
     updatedAt: string;
 }
@@ -204,6 +211,10 @@ function tokenHash(token: string): string {
 function tokenPreview(token: string): string {
     if (token.length <= 24) return token;
     return `${token.slice(0, 12)}...${token.slice(-8)}`;
+}
+
+function makeBatchId(prefix = "reg_batch"): string {
+    return `${prefix}_${Date.now()}_${randomUUID().slice(0, 8)}`;
 }
 
 function redactCliArgs(args: string[]): string[] {
@@ -715,6 +726,86 @@ function extractSmsCountries(payload: unknown): SmsCountryItem[] {
         })
         .filter((item): item is SmsCountryItem => Boolean(item))
         .sort((a, b) => a.code - b.code);
+}
+
+function extractSmsBalance(payload: unknown): number | undefined {
+    if (typeof payload === "number") {
+        return Number.isFinite(payload) ? payload : undefined;
+    }
+    if (typeof payload === "string") {
+        const match = payload.match(/ACCESS_BALANCE[:：]\s*(-?\d+(?:\.\d+)?)/i) ?? payload.match(/-?\d+(?:\.\d+)?/);
+        if (!match) return undefined;
+        const balance = Number(match[1] ?? match[0]);
+        return Number.isFinite(balance) ? balance : undefined;
+    }
+    if (!isRecord(payload)) return undefined;
+    for (const key of ["balance", "Balance", "BALANCE", "money", "amount", "credits"]) {
+        if (key in payload) {
+            const balance = toFiniteNumber(payload[key]);
+            if (balance != null) return balance;
+        }
+    }
+    if (isRecord(payload.data)) return extractSmsBalance(payload.data);
+    return undefined;
+}
+
+async function getSmsBalances(): Promise<Record<string, unknown>> {
+    const config = readConfigSync();
+    const providers: Array<{
+        provider: EditableSmsProvider;
+        providerLabel: string;
+        apiKey: string;
+        baseUrl: string;
+    }> = [];
+    const smsbowerApiKey = asString(config.smsbowerApiKey);
+    const heroApiKey = asString(config.heroSMSApiKey);
+    if (smsbowerApiKey) {
+        providers.push({
+            provider: "smsbower",
+            providerLabel: "SmsBower",
+            apiKey: smsbowerApiKey,
+            baseUrl: normalizeSmsApiBaseUrl(asString(config.smsbowerBaseUrl), "https://smsbower.online/stubs/handler_api.php"),
+        });
+    }
+    if (heroApiKey) {
+        providers.push({
+            provider: "hero-sms",
+            providerLabel: "HeroSMS",
+            apiKey: heroApiKey,
+            baseUrl: normalizeSmsApiBaseUrl(asString(config.heroSMSBaseUrl), "https://hero-sms.com/stubs/handler_api.php"),
+        });
+    }
+
+    const items = await Promise.all(providers.map(async (provider) => {
+        try {
+            const payload = await fetchSmsApi(provider.baseUrl, provider.apiKey, "getBalance", {});
+            const balance = extractSmsBalance(payload);
+            if (balance == null) {
+                const payloadText = typeof payload === "string" ? payload : String(JSON.stringify(payload) ?? payload);
+                throw new Error(`无法解析余额: ${payloadText.slice(0, 160)}`);
+            }
+            return {
+                provider: provider.provider,
+                providerLabel: provider.providerLabel,
+                apiKeyMasked: maskSecret(provider.apiKey),
+                ok: true,
+                balance,
+                currency: "USD",
+                fetchedAt: nowIso(),
+            };
+        } catch (error) {
+            return {
+                provider: provider.provider,
+                providerLabel: provider.providerLabel,
+                apiKeyMasked: maskSecret(provider.apiKey),
+                ok: false,
+                error: error instanceof Error ? error.message : String(error),
+                fetchedAt: nowIso(),
+            };
+        }
+    }));
+
+    return {items, fetchedAt: nowIso()};
 }
 
 async function getSmsCountries(query: URLSearchParams): Promise<Record<string, unknown>> {
@@ -1331,8 +1422,15 @@ function finishRegisterTask(
     if (status === "failed" && !task.error) {
         task.error = `exit code ${options.code}`;
     }
+    if (status === "failed") {
+        const diagnosis = classifyTaskFailure(task);
+        task.errorType = diagnosis.errorType;
+        task.errorSuggestion = diagnosis.suggestion;
+    }
     if (status === "success") {
         task.error = undefined;
+        task.errorType = undefined;
+        task.errorSuggestion = undefined;
     }
 
     const removeTokenHash = task.kind === "oa-sub2api"
@@ -1358,9 +1456,31 @@ function finishRegisterTask(
         appendTaskLog(task, "system", "success captured; terminating lingering child process");
         killProcessTree(task.child);
     }
+    maybeReplenishAutoRegisterBatch(task);
     saveRegisterTasksLater();
     scheduleRegisterTasks();
     return true;
+}
+
+function maybeReplenishAutoRegisterBatch(task: RuntimeRegisterTask): void {
+    if (task.kind !== "register" || !task.batchId || !task.autoTargetSuccess || !task.autoMaxAttempts) return;
+    const batchTasks = Array.from(registerTasks.values()).filter((item) => item.kind === "register" && item.batchId === task.batchId);
+    const success = batchTasks.filter((item) => item.status === "success").length;
+    const active = batchTasks.filter((item) => item.status === "queued" || item.status === "running").length;
+    if (success >= task.autoTargetSuccess || active > 0 || batchTasks.length >= task.autoMaxAttempts) return;
+    const remainingSuccess = task.autoTargetSuccess - success;
+    const remainingAttempts = task.autoMaxAttempts - batchTasks.length;
+    const count = Math.max(0, Math.min(remainingSuccess, remainingAttempts));
+    if (!count) return;
+    appendTaskLog(task, "system", `auto-register replenish: creating ${count} more task(s) for batch ${task.batchId}`);
+    createRegisterTasks({
+        count,
+        concurrency: registerMaxConcurrency,
+        tokenOut: task.tokenOut,
+        batchId: task.batchId,
+        autoTargetSuccess: task.autoTargetSuccess,
+        autoMaxAttempts: task.autoMaxAttempts,
+    });
 }
 
 function scheduleRegisterTasks(): void {
@@ -1413,6 +1533,9 @@ function startRegisterTask(task: RuntimeRegisterTask): void {
 function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
     const count = safeNumber(body.count, 10, 1, 100);
     const concurrency = safeNumber(body.concurrency, 10, 1, 10);
+    const batchId = String(body.batchId ?? "").trim() || makeBatchId();
+    const autoTargetSuccess = body.autoTargetSuccess == null ? undefined : safeNumber(body.autoTargetSuccess, count, 1, 100);
+    const autoMaxAttempts = body.autoMaxAttempts == null ? undefined : safeNumber(body.autoMaxAttempts, Math.max(count, autoTargetSuccess ?? count), 1, 300);
     registerMaxConcurrency = concurrency;
 
     const ppxy = getPpxyConfig();
@@ -1433,6 +1556,9 @@ function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
             kind: "register",
             status: "queued",
             title: `phone register #${i + 1}`,
+            batchId,
+            autoTargetSuccess,
+            autoMaxAttempts,
             createdAt: nowIso(),
             updatedAt: nowIso(),
             args: ["src/index.ts", "--phone", "--at", "--st", "--gp-token-out", tokenOut],
@@ -1443,7 +1569,7 @@ function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
         registerTasks.set(id, task);
         registerQueue.push(task);
         created.push(task);
-        appendTaskLog(task, "system", `queued tokenOut=${tokenOut}`);
+        appendTaskLog(task, "system", `queued batchId=${batchId} tokenOut=${tokenOut}`);
     }
     saveRegisterTasksLater();
     scheduleRegisterTasks();
@@ -2005,6 +2131,11 @@ function tokenInfo(token: string, index: number): Record<string, unknown> {
     const phone = getPhoneFromToken(token);
     const oaMeta = atMeta.oa[hash];
     const oaEligible = Boolean(phone) && oaMeta?.enabled !== false;
+    const expired = exp ? Date.now() > exp * 1000 : false;
+    const trial = atMeta.trial[hash];
+    const usableForPlus = !expired && trial?.eligible !== false;
+    const usableForOA = !expired && oaEligible;
+    const riskLevel = expired ? "high" : (!phone || trial?.eligible === false) ? "medium" : "low";
     return {
         index,
         hash,
@@ -2016,8 +2147,15 @@ function tokenInfo(token: string, index: number): Record<string, unknown> {
         plan: String(auth.chatgpt_plan_type ?? ""),
         exp,
         expiresAt: exp ? new Date(exp * 1000).toISOString() : "",
-        expired: exp ? Date.now() > exp * 1000 : false,
-        trial: atMeta.trial[hash],
+        expired,
+        quality: {
+            usableForOA,
+            usableForPlus,
+            hasPhone: Boolean(phone),
+            riskLevel,
+            lastCheckAt: trial?.checkedAt ?? "",
+        },
+        trial,
         oa: {
             enabled: oaMeta?.enabled ?? null,
             eligible: oaEligible,
@@ -2500,6 +2638,52 @@ async function readAgentDoc(filePath: string): Promise<{path: string; content: s
     };
 }
 
+async function getSystemSummary(): Promise<Record<string, unknown>> {
+    const tokens = await readTokenPool();
+    const atItems = tokens.map(tokenInfo);
+    const oaEmails = await readOaEmailPool();
+    const registerOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "register");
+    const oaOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "oa-sub2api");
+    const registerStatuses = groupCounts(registerOnly.map((task) => task.status));
+    const oaStatuses = groupCounts(oaOnly.map((task) => task.status));
+    const plusStatuses = groupCounts(Array.from(plusJobs.values()).map((job) => String(job.status || "unknown")));
+    const todayPrefix = new Date().toISOString().slice(0, 10);
+    return {
+        register: {
+            running: registerStatuses.running ?? 0,
+            queued: registerStatuses.queued ?? 0,
+            success: registerStatuses.success ?? 0,
+            failed: registerStatuses.failed ?? 0,
+            successToday: registerOnly.filter((task) => task.status === "success" && task.finishedAt?.startsWith(todayPrefix)).length,
+            failedToday: registerOnly.filter((task) => task.status === "failed" && task.finishedAt?.startsWith(todayPrefix)).length,
+            lastBatch: getRegisterBatchSummaries()[0] ?? null,
+        },
+        at: {
+            total: atItems.length,
+            withPhone: atItems.filter((item) => Boolean(item.phone)).length,
+            expired: atItems.filter((item) => item.expired === true).length,
+            trialEligible: atItems.filter((item) => (item.trial as TrialResult | undefined)?.eligible === true).length,
+            usableForOA: atItems.filter((item) => (item.quality as Record<string, unknown> | undefined)?.usableForOA === true).length,
+            usableForPlus: atItems.filter((item) => (item.quality as Record<string, unknown> | undefined)?.usableForPlus === true).length,
+        },
+        oa: {
+            running: oaStatuses.running ?? 0,
+            queued: oaStatuses.queued ?? 0,
+            success: oaStatuses.success ?? 0,
+            failed: oaStatuses.failed ?? 0,
+            availableEmails: oaEmails.filter((item) => item.available).length,
+            boundToday: oaEmails.filter((item) => item.bindStatus === "bound" && item.bindUpdatedAt?.startsWith(todayPrefix)).length,
+        },
+        plus: {
+            total: plusJobs.size,
+            statuses: plusStatuses,
+            running: Array.from(plusJobs.values()).filter((job) => !job.done && job.status !== "failed" && job.status !== "success").length,
+            otpPending: Array.from(plusJobs.values()).filter((job) => job.otpPending || job.status === "otp_pending").length,
+            successToday: Array.from(plusJobs.values()).filter((job) => job.status === "success" && job.updatedAt?.startsWith(todayPrefix)).length,
+        },
+    };
+}
+
 async function sendAgentDocs(res: ServerResponse): Promise<void> {
     const [quick, full] = await Promise.all([
         readAgentDoc(agentQuickDocFile),
@@ -2566,11 +2750,115 @@ function runningTaskCount(kind?: TaskKind): number {
         .length;
 }
 
-async function deleteRegisterTasksByStatus(statuses: Set<TaskStatus>): Promise<Record<string, unknown>> {
+
+function taskLogsText(task: RuntimeRegisterTask): string {
+    return [...(task.logs ?? []), task.error ?? ""].join("\n").toLowerCase();
+}
+
+function classifyTaskFailure(task: RuntimeRegisterTask): {errorType: string; suggestion: string; retryable: boolean} {
+    const text = taskLogsText(task);
+    if (/no_number|no numbers|no free phones|balance|insufficient/i.test(text)) {
+        return {errorType: "sms_no_number", suggestion: "SMS inventory or balance may be unavailable; switch country/price tier or retry later.", retryable: true};
+    }
+    if (/otp|sms|code|wait_code|status_wait|timeout|timed out/i.test(text)) {
+        return {errorType: "sms_otp_timeout", suggestion: "SMS OTP wait likely timed out; lower concurrency or retry with another tier.", retryable: true};
+    }
+    if (/proxy|econnreset|etimedout|tunnel|socket|connect|net::/i.test(text)) {
+        return {errorType: "proxy_error", suggestion: "Proxy/network looks unstable; check proxy reachability and reduce concurrency.", retryable: true};
+    }
+    if (/browser|chrom|playwright|sentinel|executable|spawn/i.test(text)) {
+        return {errorType: "browser_error", suggestion: "Browser/Sentinel automation failed; check browser path and runtime environment.", retryable: true};
+    }
+    if (/black phone|blocked|rate limit|risk|openai/i.test(text)) {
+        return {errorType: "openai_blocked", suggestion: "OpenAI risk control or number rejection; retry with another number/proxy.", retryable: true};
+    }
+    if (/email_already_in_use|already in use/i.test(text)) {
+        return {errorType: "email_already_in_use", suggestion: "Email is already in use; do not retry this mailbox, use another one.", retryable: false};
+    }
+    return {errorType: "unknown", suggestion: "Inspect the last 50 diagnosis log lines; lower concurrency if retrying.", retryable: true};
+}
+
+function summarizeTaskDiagnosis(task: RuntimeRegisterTask): Record<string, unknown> {
+    const failure = task.status === "failed" ? classifyTaskFailure(task) : undefined;
+    const lastImportantLogs = (task.logs ?? []).slice(-50);
+    return {
+        id: task.id,
+        kind: task.kind,
+        status: task.status,
+        batchId: task.batchId ?? "",
+        title: task.title,
+        phone: task.phone ?? "",
+        stage: task.status === "success" ? "done" : task.status === "running" ? "running" : task.status === "queued" ? "queued" : task.status,
+        error: task.error ?? "",
+        errorType: task.errorType ?? failure?.errorType ?? "",
+        retryable: failure?.retryable ?? task.status === "failed",
+        recommendedAction: task.errorSuggestion ?? failure?.suggestion ?? "",
+        lastImportantLogs,
+    };
+}
+
+function groupCounts<T extends string>(items: T[]): Record<T, number> {
+    return items.reduce((acc, item) => {
+        acc[item] = (acc[item] ?? 0) + 1;
+        return acc;
+    }, {} as Record<T, number>);
+}
+
+function getRegisterBatchSummaries(): Array<Record<string, unknown>> {
+    const batches = new Map<string, RuntimeRegisterTask[]>();
+    for (const task of registerTasks.values()) {
+        if (task.kind !== "register") continue;
+        const batchId = task.batchId || "legacy";
+        const list = batches.get(batchId) ?? [];
+        list.push(task);
+        batches.set(batchId, list);
+    }
+    return Array.from(batches.entries()).map(([batchId, tasks]) => {
+        const sorted = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+        const statuses = groupCounts(tasks.map((task) => task.status));
+        const first = sorted[0];
+        const last = sorted[sorted.length - 1];
+        const targetSuccess = Math.max(...tasks.map((task) => task.autoTargetSuccess ?? 0), 0);
+        const maxAttempts = Math.max(...tasks.map((task) => task.autoMaxAttempts ?? 0), 0);
+        const done = (statuses.running ?? 0) === 0 && (statuses.queued ?? 0) === 0;
+        return {
+            batchId,
+            count: tasks.length,
+            statuses,
+            success: statuses.success ?? 0,
+            failed: statuses.failed ?? 0,
+            running: statuses.running ?? 0,
+            queued: statuses.queued ?? 0,
+            canceled: statuses.canceled ?? 0,
+            targetSuccess: targetSuccess || undefined,
+            maxAttempts: maxAttempts || undefined,
+            targetReached: targetSuccess ? (statuses.success ?? 0) >= targetSuccess : undefined,
+            done,
+            createdAt: first?.createdAt ?? "",
+            updatedAt: last?.updatedAt ?? "",
+        };
+    }).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+}
+
+function getRegisterBatchSummary(batchId: string): Record<string, unknown> | undefined {
+    return getRegisterBatchSummaries().find((batch) => batch.batchId === batchId);
+}
+
+async function deleteRegisterTasksByStatus(
+    statuses: Set<TaskStatus>,
+    options: {batchId?: string; olderThanMinutes?: number; dryRun?: boolean} = {},
+): Promise<Record<string, unknown>> {
+    const cutoff = options.olderThanMinutes && options.olderThanMinutes > 0
+        ? Date.now() - options.olderThanMinutes * 60_000
+        : 0;
     const targets = Array.from(registerTasks.values())
         .filter((task) => task.kind === "register")
         .filter((task) => statuses.has(task.status))
-        .filter((task) => task.status !== "running");
+        .filter((task) => task.status !== "running")
+        .filter((task) => !options.batchId || task.batchId === options.batchId)
+        .filter((task) => !cutoff || Date.parse(task.updatedAt || task.createdAt) <= cutoff);
+    const ids = targets.map((task) => task.id);
+    if (options.dryRun) return {deleted: 0, matched: ids.length, dryRun: true, ids};
     const deleted: string[] = [];
     for (const task of targets) {
         registerQueue = registerQueue.filter((item) => item.id !== task.id);
@@ -2583,7 +2871,7 @@ async function deleteRegisterTasksByStatus(statuses: Set<TaskStatus>): Promise<R
         deleted.push(task.id);
     }
     if (deleted.length) saveRegisterTasksLater();
-    return {deleted: deleted.length, ids: deleted};
+    return {deleted: deleted.length, matched: ids.length, ids: deleted};
 }
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -2628,6 +2916,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
+    if (method === "GET" && pathname === "/api/summary") {
+        sendJson(res, 200, await getSystemSummary());
+        return;
+    }
+
     if (method === "GET" && pathname === "/api/register/password") {
         sendJson(res, 200, getRegisterPasswordView());
         return;
@@ -2652,6 +2945,11 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
     if (method === "GET" && pathname === "/api/sms/countries") {
         sendJson(res, 200, await getSmsCountries(url.searchParams));
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/sms/balances") {
+        sendJson(res, 200, await getSmsBalances());
         return;
     }
 
@@ -2689,6 +2987,42 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
+    if (method === "GET" && pathname === "/api/register/batches") {
+        sendJson(res, 200, {batches: getRegisterBatchSummaries()});
+        return;
+    }
+
+    const registerBatchMatch = pathname.match(/^\/api\/register\/batches\/([^/]+)$/);
+    if (registerBatchMatch && method === "GET") {
+        const batchId = decodeURIComponent(registerBatchMatch[1]);
+        const batch = getRegisterBatchSummary(batchId);
+        if (!batch) {
+            sendJson(res, 404, {error: "batch not found"});
+            return;
+        }
+        sendJson(res, 200, {
+            batch,
+            tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "register" && task.batchId === batchId).map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+        });
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/register/auto") {
+        const body = await readJsonBody(req);
+        const targetSuccess = safeNumber(body.targetSuccess, 10, 1, 100);
+        const maxAttempts = safeNumber(body.maxAttempts, Math.max(targetSuccess * 2, targetSuccess), targetSuccess, 300);
+        const initialCount = safeNumber(body.count ?? body.initialCount, Math.min(targetSuccess, maxAttempts), 1, Math.min(100, maxAttempts));
+        const tasks = createRegisterTasks({
+            ...body,
+            count: initialCount,
+            autoTargetSuccess: targetSuccess,
+            autoMaxAttempts: maxAttempts,
+        }).map((task) => publicTask(task as RuntimeRegisterTask));
+        const batchId = tasks[0]?.batchId ?? "";
+        sendJson(res, 201, {batchId, targetSuccess, maxAttempts, tasks});
+        return;
+    }
+
     if (method === "GET" && pathname === "/api/register/tasks") {
         sendJson(res, 200, {
             tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "register").map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
@@ -2702,7 +3036,24 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (method === "POST" && pathname === "/api/register/tasks") {
         const body = await readJsonBody(req);
         const tasks = createRegisterTasks(body).map((task) => publicTask(task as RuntimeRegisterTask));
-        sendJson(res, 201, {tasks});
+        sendJson(res, 201, {batchId: tasks[0]?.batchId ?? "", tasks});
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/register/tasks/cleanup") {
+        const body = await readJsonBody(req);
+        const rawStatuses = parseStringList(body.status ?? body.statuses ?? "failed");
+        const allowedStatuses: TaskStatus[] = ["queued", "failed", "canceled"];
+        const statuses = new Set<TaskStatus>(rawStatuses.filter((item): item is TaskStatus => allowedStatuses.includes(item as TaskStatus)));
+        if (!statuses.size) {
+            sendJson(res, 400, {error: "no deletable statuses selected"});
+            return;
+        }
+        sendJson(res, 200, await deleteRegisterTasksByStatus(statuses, {
+            batchId: String(body.batchId ?? "").trim() || undefined,
+            olderThanMinutes: body.olderThanMinutes == null ? undefined : Number(body.olderThanMinutes),
+            dryRun: body.dryRun === true,
+        }));
         return;
     }
 
@@ -2795,7 +3146,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
-    const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel))?$/);
+    const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel|diagnosis))?$/);
     if (taskMatch) {
         const task = registerTasks.get(decodeURIComponent(taskMatch[1]));
         if (!task) {
@@ -2805,6 +3156,10 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         if (method === "POST" && taskMatch[2] === "cancel") {
             cancelRegisterTask(task);
             sendJson(res, 200, {task: publicTask(task)});
+            return;
+        }
+        if (method === "GET" && taskMatch[2] === "diagnosis") {
+            sendJson(res, 200, {diagnosis: summarizeTaskDiagnosis(task)});
             return;
         }
         if (method === "GET" && !taskMatch[2]) {

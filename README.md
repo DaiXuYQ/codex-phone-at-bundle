@@ -167,3 +167,17 @@ export SENTINEL_BROWSER_PATH="/usr/bin/google-chrome"
 可用于：
 - ChatGPT Plus 订阅
 - chatgpt.com API 调用
+
+## Agent API improvements
+
+This branch adds agent-friendly orchestration endpoints:
+
+- `GET /api/summary` — one-call dashboard summary for register/AT/OA/Plus state.
+- `GET /api/register/batches` — batch-level register task summary (`batchId`, success/failed/running/queued counts).
+- `GET /api/register/batches/{batchId}` — batch detail and tasks.
+- `POST /api/register/tasks/cleanup` — safe bulk cleanup for non-running register tasks. Body: `{ "status": "failed", "batchId": "optional", "olderThanMinutes": 0, "dryRun": true }`.
+- `GET /api/tasks/{id}/diagnosis` — structured task diagnosis with `errorType`, `retryable`, `recommendedAction`, and last logs.
+- `POST /api/register/auto` — target-success registration. Body: `{ "targetSuccess": 10, "maxAttempts": 30, "concurrency": 10 }`; failed attempts are replenished until target success or max attempts.
+- `GET /api/ats` items now include `quality` (`usableForOA`, `usableForPlus`, `hasPhone`, `riskLevel`, `lastCheckAt`).
+
+Existing `POST /api/register/tasks` responses now include `batchId`, and each task carries its `batchId`.
