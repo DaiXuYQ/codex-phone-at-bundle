@@ -1996,3 +1996,33 @@ pre,
     grid-template-columns: 1fr;
   }
 }
+
+.register-view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  padding: 3px;
+}
+
+.register-view-tabs button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.register-view-tabs button.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.view-panel.hidden {
+  display: none !important;
+}

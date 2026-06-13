@@ -11,6 +11,7 @@ let registerPasswordCache = "";
 let taskStatusFilter = "all";
 let agentSummaryCache = null;
 let registerBatchesCache = [];
+let registerView = "tasks";
 
 const SMS_COUNTRY_FALLBACK = [
   {code: 33, nameZh: "哥伦比亚", nameEn: "Colombia"},
@@ -270,7 +271,6 @@ function taskRow(task) {
       <td>${badge(task.status)}</td>
       <td>
         <div class="task-main mono">${escapeHtml(taskName(task))}</div>
-        ${task.batchId ? `<div class="task-note"><span class="mono">batch: ${escapeHtml(task.batchId)}</span></div>` : ""}
         ${note}
         ${successNote}
       </td>
@@ -470,7 +470,7 @@ function updateTaskFilterCounts() {
 }
 
 function renderTable(batchId = "") {
-  const visibleTasks = filteredTasks(batchId);
+  const visibleTasks = filteredTasks(registerView === "batches" ? batchId : "");
   $("#tasks").innerHTML = visibleTasks.length
     ? visibleTasks.map(taskRow).join("")
     : `<tr><td colspan="6"><div class="empty">当前筛选下暂无任务</div></td></tr>`;
@@ -857,6 +857,18 @@ async function saveDefaultProxy(proxyUrl) {
   toast(proxyUrl && proxyUrl.toLowerCase() !== "direct" ? "默认代理已保存" : "默认代理已清空，当前直连");
 }
 
+function switchRegisterView(view) {
+  registerView = view === "batches" ? "batches" : "tasks";
+  document.querySelectorAll("[data-register-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.registerView === registerView);
+  });
+  document.querySelectorAll("[data-view-panel]").forEach((panel) => {
+    panel.classList.toggle("hidden", panel.dataset.viewPanel !== registerView);
+  });
+  renderTable();
+  if (registerView === "batches") loadAgentDashboard().catch((error) => toast(error.message));
+}
+
 async function startAutoRegister(event) {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -890,6 +902,9 @@ async function cleanupFailedTasks(dryRun) {
   await loadTasks();
 }
 
+document.querySelectorAll("[data-register-view]").forEach((button) => {
+  button.addEventListener("click", () => switchRegisterView(button.dataset.registerView));
+});
 $("#start-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = new FormData(event.currentTarget);
@@ -964,6 +979,7 @@ document.addEventListener("keydown", (event) => {
   closePasswordModal();
 });
 
+switchRegisterView("tasks");
 Promise.all([loadTasks(), loadConfig(), loadSuccessSummary(), loadSmsBalances(), loadAgentDashboard()]).catch((error) => toast(error.message));
 setInterval(() => loadTasks().catch(() => undefined), 3000);
 setInterval(() => loadSmsBalances().catch(() => undefined), 60000);
