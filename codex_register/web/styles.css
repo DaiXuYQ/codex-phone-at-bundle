@@ -694,13 +694,14 @@ pre,
 
 .success-summary-main {
   display: grid;
-  grid-template-columns: auto auto auto minmax(220px, 1fr);
+  grid-template-columns: auto auto auto auto minmax(220px, 1fr);
   gap: 10px;
   min-width: 0;
   flex: 1;
 }
 
 .summary-pill,
+.summary-filter-card,
 .success-path {
   border: 1px solid var(--border);
   border-radius: 12px;
@@ -709,6 +710,7 @@ pre,
 }
 
 .summary-pill span,
+.summary-filter-card span,
 .success-path span,
 .success-path small {
   display: block;
@@ -739,63 +741,30 @@ pre,
   white-space: nowrap;
 }
 
-.success-path-head,
-.success-path-line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  min-width: 0;
-}
-
-.success-path-head {
-  margin-bottom: 2px;
-}
-
-.success-path-head span {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.success-path-line {
-  margin-top: 3px;
-}
-
-.success-path-line code {
-  flex: 1 1 auto;
-  min-width: 0;
-  margin-top: 0;
-}
-
-.success-path-line small {
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.success-path-footer {
-  display: none;
+.summary-filter-card {
+  min-width: 330px;
 }
 
 .task-filter {
   display: inline-flex;
   align-items: center;
-  gap: 2px;
-  flex: 0 0 auto;
+  gap: 4px;
+  margin-top: 4px;
   border: 1px solid var(--border);
   border-radius: 999px;
   background: var(--surface-2);
-  padding: 1px;
+  padding: 2px;
 }
 
 .task-filter button {
-  min-height: 20px;
+  min-height: 26px;
   border: 0;
   border-radius: 999px;
   background: transparent;
   box-shadow: none;
-  padding: 2px 6px;
+  padding: 4px 10px;
   color: var(--muted);
-  font-size: 10.5px;
+  font-size: 12px;
 }
 
 .task-filter button:hover {
