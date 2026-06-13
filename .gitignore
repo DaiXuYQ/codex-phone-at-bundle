@@ -1,0 +1,33 @@
+# Dependencies / build output
+node_modules/
+codex_register/node_modules/
+dist/
+bundle/
+*.tsbuildinfo
+
+# Local runtime data
+.web-data/
+codex_register/.web-data/
+codex_register/auth/
+codex_register/hotmail/tokens.txt
+codex_register/hotmail/*.txt
+pool_tokens.txt
+pool_phones.txt
+
+# Local secrets
+ppxy-env.cmd
+codex_register/config.json
+.env
+.env.*
+
+# Logs
+*.log
+*.err.log
+*.out.log
+
+# OS/editor noise
+._*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

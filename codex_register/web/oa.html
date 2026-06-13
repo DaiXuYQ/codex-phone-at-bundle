@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OA 接入 SUB2API</title>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app">
+    <header class="topbar shellbar">
+      <div class="title">
+        <div class="eyebrow">OA Workspace</div>
+        <h1>OA 接入 SUB2API</h1>
+        <p>导入“邮箱-----接码地址”，取 AT 池里带手机号的账号，用手机号密码登录并绑定邮箱，再通过 SUB2API OAuth 导入中转站。</p>
+      </div>
+      <nav class="nav">
+        <button class="nav-ai" type="button" data-agent-open>AI 接入</button>
+        <a href="/">首页</a>
+        <a href="/register">手机号注册</a>
+        <a href="/plus">AT 升级</a>
+        <a class="active" href="/oa">OA 接入</a>
+        <button class="ghost" type="button" data-theme-toggle>白天</button>
+      </nav>
+    </header>
+
+    <section class="plus-workbench oa-workbench">
+      <aside class="card panel-left">
+        <div class="section-head">
+          <div>
+            <h2>邮箱池</h2>
+            <p class="muted">支持邮箱----密码----clientId----refreshToken。</p>
+          </div>
+          <button id="open-import" class="primary small" type="button">导入</button>
+        </div>
+        <div class="stat-grid compact">
+          <div id="email-pool-stat" class="stat stat-clickable" role="button" tabindex="0" title="点击查看全部邮箱池">
+            <div class="label">邮箱</div>
+            <div id="email-count" class="value">0</div>
+          </div>
+          <div class="stat"><div class="label">AT+手机号</div><div id="phone-at-count" class="value">0</div></div>
+        </div>
+        <div class="row toolbar">
+          <button id="reload-emails" class="small" type="button">刷新邮箱</button>
+          <button id="open-email-pool" class="small" type="button">查看邮箱池</button>
+          <button id="reload-ats" class="small" type="button">刷新 AT</button>
+        </div>
+        <div id="oa-at-list" class="oa-at-list"></div>
+        <div id="emails" class="email-list"></div>
+        <div class="config-strip">
+          <div class="muted">EMAIL POOL FILE</div>
+          <div id="email-file" class="mono wrap"></div>
+        </div>
+      </aside>
+
+      <section class="card panel-main">
+        <div class="section-head">
+          <div>
+            <h2>OA 任务列表</h2>
+            <p class="muted">按任务形式展示手机号登录、邮箱绑定、OAuth 回调和 SUB2API 创建结果。</p>
+          </div>
+          <button id="refresh-tasks" class="small" type="button">刷新</button>
+        </div>
+        <div class="table-wrap clean">
+          <table>
+            <thead>
+              <tr>
+                <th>状态</th>
+                <th>任务</th>
+                <th>手机号</th>
+                <th>绑定邮箱</th>
+                <th>SUB2API</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="tasks"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside class="card panel-right">
+        <h2>创建 OA 接入任务</h2>
+        <p class="muted">按顺序取 AT 池里已经带手机号的 token，并预留同等数量的邮箱。</p>
+        <form id="task-form">
+          <div class="split">
+            <div class="field">
+              <label for="count">数量</label>
+              <input id="count" name="count" type="number" min="1" max="500" value="1">
+            </div>
+            <div class="field">
+              <label for="concurrency">并发</label>
+              <input id="concurrency" name="concurrency" type="number" min="1" max="10" value="1">
+            </div>
+          </div>
+          <div class="field">
+            <label for="password">手机号登录密码</label>
+            <input id="password" name="password" placeholder="默认读取 config.json defaultPassword">
+          </div>
+          <div class="field">
+            <label for="oaProxyUrl">OA 登录代理</label>
+            <input id="oaProxyUrl" name="oaProxyUrl" placeholder="留空使用默认代理；填 direct 可强制直连">
+            <div id="oa-proxy-current" class="hint">当前默认代理读取中...</div>
+          </div>
+          <div class="row toolbar">
+            <button id="probe-oa-proxy" class="small" type="button">测试 OAuth 网络</button>
+            <button id="probe-oa-direct" class="small" type="button">直连测试</button>
+            <button id="save-oa-proxy" class="small" type="button">保存为默认代理</button>
+          </div>
+          <div class="hint warning-text">创建任务前会自动检测 OAuth 网络；检测不通过不会占用邮箱，也不会创建任务。</div>
+          <pre id="oa-probe-result" class="probe-result hidden"></pre>
+          <div class="field">
+            <label for="tokenOut">OAuth AT 输出文件</label>
+            <input id="tokenOut" name="tokenOut" placeholder="默认读取 ppxy-env.cmd 的 TOKEN_FILE">
+          </div>
+          <label class="check-row">
+            <input id="removeTokenOnSuccess" name="removeTokenOnSuccess" type="checkbox">
+            <span>成功后从 AT 池移除原 token</span>
+          </label>
+          <button class="primary wide" type="submit">创建 OA 接入任务</button>
+        </form>
+
+        <div class="config-strip">
+          <h3>SUB2API 配置</h3>
+          <p class="muted">保存地址、账号、密码和导入分组后，新任务会使用这组配置。</p>
+          <form id="sub2api-form">
+            <div class="field">
+              <label for="sub2apiUrl">地址</label>
+              <input id="sub2apiUrl" name="url" placeholder="https://your-sub2api.example">
+            </div>
+            <div class="field">
+              <label for="sub2apiEmail">账号</label>
+              <input id="sub2apiEmail" name="email" placeholder="admin@example.com">
+            </div>
+            <div class="field">
+              <label for="sub2apiPassword">密码</label>
+              <input id="sub2apiPassword" name="password" type="password" autocomplete="new-password">
+            </div>
+            <div class="field">
+              <label for="sub2apiGroupNames">导入分组</label>
+              <input id="sub2apiGroupNames" name="groupNames" placeholder="codex 或 group1,group2">
+            </div>
+            <div class="field">
+              <label for="sub2apiProxyName">代理名称/ID（可选）</label>
+              <input id="sub2apiProxyName" name="proxyName" placeholder="proxy name or id">
+            </div>
+            <div class="split">
+              <div class="field">
+                <label for="sub2apiAccountPriority">优先级</label>
+                <input id="sub2apiAccountPriority" name="accountPriority" type="number" min="1" value="1">
+              </div>
+              <div class="field">
+                <label for="sub2apiConcurrency">账号并发</label>
+                <input id="sub2apiConcurrency" name="concurrency" type="number" min="1" value="10">
+              </div>
+            </div>
+            <button class="wide" type="submit">保存 SUB2API 配置</button>
+          </form>
+          <pre id="sub2api-config"></pre>
+        </div>
+      </aside>
+    </section>
+
+    <div id="import-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-import></div>
+      <div class="modal-panel modal-narrow">
+        <div class="modal-head">
+          <div>
+            <h2>导入邮箱池</h2>
+            <p class="muted">支持：邮箱-----接码地址；或：邮箱----密码----clientId----refreshToken。</p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-import>×</button>
+        </div>
+        <div class="modal-body">
+          <div class="field">
+            <label for="import-file-path">本地邮箱文件路径</label>
+            <input id="import-file-path" placeholder="可选，C:\Users\Administtrator\Desktop\100个邮箱.txt">
+            <div class="hint">填写后会从服务端本机读取文件；也可以不填，直接粘贴到下面文本框。</div>
+          </div>
+          <div class="field">
+            <label for="mail-api-base-url">接码 API 域名（可选）</label>
+            <input id="mail-api-base-url" placeholder="http://域名 或 http://域名/api/GetLastEmails">
+            <div class="hint">留空时使用已保存域名；没有已保存域名则直接用 Hotmail refresh_token 读 Outlook。</div>
+          </div>
+          <textarea id="import-text" class="large-textarea" placeholder="user@example.com-----https://mail-api.example/get?id=...&#10;user@outlook.com----password----clientId----refreshToken"></textarea>
+          <div class="row spread">
+            <span class="muted">接码地址会在 OAuth 绑定邮箱验证码阶段轮询。</span>
+            <div class="row">
+              <button id="rebase-btn" type="button">按域名修复现有邮箱池</button>
+              <button id="import-btn" class="primary" type="button">确认导入</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="email-list-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-email-list></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <h2>邮箱池</h2>
+            <p id="email-list-modal-subtitle" class="muted"></p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-email-list>×</button>
+        </div>
+        <div id="email-pool-list" class="modal-body email-pool-modal-list"></div>
+      </div>
+    </div>
+
+    <div id="task-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-task></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <h2 id="task-modal-title">任务详情</h2>
+            <p id="task-modal-subtitle" class="muted"></p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-task>×</button>
+        </div>
+        <pre id="task-detail" class="logbox modal-log"></pre>
+      </div>
+    </div>
+
+    <div id="email-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-email></div>
+      <div class="modal-panel modal-narrow">
+        <div class="modal-head">
+          <div>
+            <h2 id="email-modal-title">邮箱详情</h2>
+            <p id="email-modal-subtitle" class="muted"></p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-email>×</button>
+        </div>
+        <div id="email-detail" class="modal-body"></div>
+      </div>
+    </div>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/agent.js"></script>
+  <script src="/oa.js"></script>
+</body>
+</html>
