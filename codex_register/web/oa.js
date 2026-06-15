@@ -855,6 +855,9 @@ function taskRow(task) {
   const cancel = ["queued", "running"].includes(task.status)
     ? `<button class="danger small" type="button" data-cancel="${task.id}">取消</button>`
     : "";
+  const retry = ["failed", "canceled"].includes(task.status)
+    ? `<button class="small" type="button" data-retry="${task.id}">重试</button>`
+    : "";
   const del = ["failed", "canceled"].includes(task.status)
     ? `<button class="ghost small" type="button" data-delete="${task.id}">删除</button>`
     : "";
@@ -871,7 +874,7 @@ function taskRow(task) {
       <td>${phone}</td>
       <td>${email}</td>
       <td>${result}</td>
-      <td><div class="row actions"><button class="small" type="button" data-open="${task.id}">日志</button>${cancel}${del}</div></td>
+      <td><div class="row actions"><button class="small" type="button" data-open="${task.id}">日志</button>${retry}${cancel}${del}</div></td>
     </tr>
   `;
 }
@@ -934,6 +937,17 @@ function bindTaskActions() {
       await api(`/api/tasks/${btn.dataset.cancel}/cancel`, {method: "POST", body: "{}"});
       toast("已请求取消任务");
       await loadTasks();
+    });
+  });
+
+  document.querySelectorAll("[data-retry]").forEach((btn) => {
+    btn.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      const data = await api(`/api/tasks/${btn.dataset.retry}/retry`, {method: "POST", body: "{}"});
+      toast(`OA 重试任务已创建：${data.task?.id || ""}`);
+      await Promise.all([loadTasks(), loadEmails(), loadAts()]);
+      const task = data.task?.id ? tasks.find((item) => item.id === data.task.id) : null;
+      if (task) renderTaskDetail(task);
     });
   });
 

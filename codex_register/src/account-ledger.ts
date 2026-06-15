@@ -597,11 +597,13 @@ export class AccountLedger {
         const email = String(status.email ?? "").trim();
         const phone = normalizePhone(status.phone);
         const tokenHashValue = String(status.accessTokenHash ?? "").trim();
-        if (!email || (!phone && !tokenHashValue && !status.taskId)) return null;
+        const taskId = String(status.taskId ?? "").trim();
+        if (!email) return null;
+        if (!phone && !tokenHashValue && (!taskId || taskId.startsWith("wf_"))) return null;
         const account = this.findLoaded({
             phone,
             tokenHash: tokenHashValue,
-            oaTaskId: status.taskId,
+            oaTaskId: taskId,
             email,
         }) ?? this.createAccount();
         const before = structuredClone(account);
@@ -623,14 +625,14 @@ export class AccountLedger {
         account.emailBinding = {
             email,
             status: bindStatus,
-            taskId: status.taskId,
+            taskId,
             target: status.target ?? account.emailBinding?.target,
             boundAt: status.status === "bound" ? status.updatedAt : account.emailBinding?.boundAt,
             updatedAt: status.updatedAt,
         };
         if (status.status === "bound") {
             account.oa = {
-                taskId: status.taskId || `manual:${email}`,
+                taskId: taskId || `manual:${email}`,
                 target: status.target ?? "sub2api",
                 status: "success",
                 account: status.target === "cpa" ? status.cpaAccount : status.sub2apiAccount,
@@ -768,19 +770,48 @@ export class AccountLedger {
         const tokenHashValue = String(query.tokenHash ?? "").trim();
         const email = lower(query.email);
         const workflowRunId = String(query.workflowRunId ?? "").trim();
-        return Array.from(this.accounts.values()).find((account) => {
-            if (query.registerTaskId && account.register?.taskId === query.registerTaskId) return true;
-            if (query.oaTaskId && account.oa?.taskId === query.oaTaskId) return true;
-            if (query.plusLocalId && account.plus?.localId === query.plusLocalId) return true;
-            if (query.plusRemoteJobId && account.plus?.remoteJobId === query.plusRemoteJobId) return true;
-            if (tokenHashValue && account.accessToken?.hash === tokenHashValue) return true;
-            if (tokenHashValue && account.plus?.tokenHash === tokenHashValue) return true;
-            if (tokenHashValue && account.oa?.sourceAccessTokenHash === tokenHashValue) return true;
-            if (phone && normalizePhone(account.phone) === phone) return true;
-            if (email && lower(account.emailBinding?.email) === email) return true;
-            if (workflowRunId && account.workflow?.runId === workflowRunId) return true;
-            return false;
-        });
+        const accounts = Array.from(this.accounts.values());
+        const find = (predicate: (account: AccountRecord) => boolean) => accounts.find(predicate);
+        if (query.registerTaskId) {
+            const account = find((item) => item.register?.taskId === query.registerTaskId);
+            if (account) return account;
+        }
+        if (query.oaTaskId) {
+            const account = find((item) => item.oa?.taskId === query.oaTaskId);
+            if (account) return account;
+        }
+        if (query.plusLocalId) {
+            const account = find((item) => item.plus?.localId === query.plusLocalId);
+            if (account) return account;
+        }
+        if (query.plusRemoteJobId) {
+            const account = find((item) => item.plus?.remoteJobId === query.plusRemoteJobId);
+            if (account) return account;
+        }
+        if (tokenHashValue) {
+            const account = find((item) =>
+                item.accessToken?.hash === tokenHashValue
+                || item.plus?.tokenHash === tokenHashValue
+                || item.oa?.sourceAccessTokenHash === tokenHashValue,
+            );
+            if (account) return account;
+        }
+        if (phone) {
+            const account = find((item) =>
+                normalizePhone(item.phone) === phone
+                || normalizePhone(item.accessToken?.phone) === phone,
+            );
+            if (account) return account;
+        }
+        if (email) {
+            const account = find((item) => lower(item.emailBinding?.email) === email);
+            if (account) return account;
+        }
+        if (workflowRunId) {
+            const account = find((item) => item.workflow?.runId === workflowRunId);
+            if (account) return account;
+        }
+        return undefined;
     }
 }
 

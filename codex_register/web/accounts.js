@@ -2,7 +2,16 @@ const state = {
   accounts: [],
   workflows: [],
   filter: '',
+  typeFilter: 'all',
 };
+
+const TYPE_FILTERS = [
+  {key: 'all', label: '全部'},
+  {key: 'at', label: 'AT号'},
+  {key: 'rt', label: 'RT号'},
+  {key: 'free', label: 'Free'},
+  {key: 'plus', label: 'Plus'},
+];
 
 const $ = (selector) => document.querySelector(selector);
 
@@ -65,6 +74,96 @@ function renderSummary(summary = {}) {
   `;
 }
 
+function isEmptyRegisterFailure(account) {
+  const registerStatus = account.register?.status;
+  const terminalRegisterFailed = registerStatus === 'failed'
+    || registerStatus === 'canceled'
+    || account.status === 'failed';
+  return terminalRegisterFailed
+    && !account.phone
+    && !account.accessToken?.hash
+    && !account.plus
+    && !account.emailBinding?.email
+    && !account.oa;
+}
+
+function ledgerAccounts() {
+  return state.accounts.filter((account) => !isEmptyRegisterFailure(account));
+}
+
+function summaryFor(accounts) {
+  const statuses = {};
+  for (const account of accounts) {
+    statuses[account.status] = (statuses[account.status] || 0) + 1;
+  }
+  return {
+    total: accounts.length,
+    statuses,
+    withPhone: accounts.filter((account) => Boolean(account.phone)).length,
+    withAccessToken: accounts.filter((account) => Boolean(account.accessToken?.hash)).length,
+    plusSuccess: accounts.filter((account) =>
+      account.plus?.status?.toLowerCase() === 'success'
+      || account.plus?.resultCode?.toUpperCase() === 'SUCCESS'
+    ).length,
+    oaSuccess: accounts.filter((account) => account.oa?.status === 'success').length,
+  };
+}
+
+function isPlusAccount(account) {
+  return account.status === 'plus_success'
+    || account.status === 'plus_pending'
+    || account.status === 'plus_failed'
+    || Boolean(account.plus);
+}
+
+function hasBoundEmail(account) {
+  return account.emailBinding?.status === 'bound'
+    || account.oa?.status === 'success';
+}
+
+function isFreeAccount(account) {
+  return account.status === 'free'
+    || (account.free && !isPlusAccount(account));
+}
+
+function isRtAccount(account) {
+  return Boolean(account.phone && hasBoundEmail(account));
+}
+
+function isAtAccount(account) {
+  return Boolean(account.accessToken?.hash && !hasBoundEmail(account));
+}
+
+function matchesTypeFilter(account, key) {
+  if (key === 'at') return isAtAccount(account);
+  if (key === 'rt') return isRtAccount(account);
+  if (key === 'free') return isFreeAccount(account);
+  if (key === 'plus') return isPlusAccount(account);
+  return true;
+}
+
+function countType(accounts, key) {
+  if (key === 'all') return accounts.length;
+  return accounts.filter((account) => matchesTypeFilter(account, key)).length;
+}
+
+function renderTypeFilter(accounts) {
+  const el = $('#account-type-filter');
+  if (!el) return;
+  el.innerHTML = TYPE_FILTERS.map((item) => `
+    <button type="button" data-account-type="${item.key}" class="${state.typeFilter === item.key ? 'active' : ''}">
+      ${item.label}<b>${countType(accounts, item.key)}</b>
+    </button>
+  `).join('');
+  el.querySelectorAll('[data-account-type]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.typeFilter = button.dataset.accountType || 'all';
+      renderAccounts();
+      renderTypeFilter(ledgerAccounts());
+    });
+  });
+}
+
 function accountSearchText(account) {
   return [
     account.id,
@@ -83,8 +182,16 @@ function accountSearchText(account) {
 
 function filteredAccounts() {
   const filter = state.filter.trim().toLowerCase();
-  if (!filter) return state.accounts;
-  return state.accounts.filter((account) => accountSearchText(account).includes(filter));
+  const accounts = ledgerAccounts().filter((account) => matchesTypeFilter(account, state.typeFilter));
+  if (!filter) return accounts;
+  return accounts.filter((account) => accountSearchText(account).includes(filter));
+}
+
+function renderAccessTokenState(at) {
+  if (!at?.hash) return '';
+  if (at.active === false) return '已移除';
+  if (at.expired) return '已过期';
+  return 'active';
 }
 
 function renderAccounts() {
@@ -100,7 +207,7 @@ function renderAccounts() {
         <td class="mono">${fmt(account.phone)}</td>
         <td>
           <div class="mono">${shortHash(at?.hash)}</div>
-          <div class="muted tiny">${at?.active === false ? '已移除' : at?.expired ? '已过期' : 'active'}</div>
+          <div class="muted tiny">${renderAccessTokenState(at)}</div>
         </td>
         <td>
           <div>${plus ? statusBadge(plus.status) : '-'}</div>
@@ -141,7 +248,9 @@ function renderWorkflows() {
 async function loadAccounts() {
   const data = await api('/api/accounts');
   state.accounts = data.accounts || [];
-  renderSummary(data.summary || {});
+  const accounts = ledgerAccounts();
+  renderSummary(summaryFor(accounts));
+  renderTypeFilter(accounts);
   renderAccounts();
 }
 
