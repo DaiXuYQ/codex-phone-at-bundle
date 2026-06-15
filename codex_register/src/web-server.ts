@@ -7,12 +7,14 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {Agent, ProxyAgent, type Dispatcher} from "undici";
 import {DEFAULT_CLIENT_ID, DEFAULT_REDIRECT_URI, DEFAULT_USER_AGENT} from "./constants.js";
+import {createAccountLedger, type AccountRecord} from "./account-ledger.js";
 import {createHeroSmsProvider} from "./sms/heroSMS.js";
 import type {SmsProvider} from "./sms/provider.js";
 import {createSmsBowerProvider} from "./sms/smsbower.js";
 type TaskStatus = "queued" | "running" | "success" | "failed" | "canceled";
 type EditableSmsProvider = "hero-sms" | "smsbower";
 type TaskKind = "register" | "oa-sub2api";
+type OaTarget = "sub2api" | "cpa";
 type OaEmailBindStatus = "free" | "reserved" | "bound" | "failed" | "canceled" | "disabled";
 
 interface RegisterTask {
@@ -20,6 +22,9 @@ interface RegisterTask {
     kind: TaskKind;
     status: TaskStatus;
     title: string;
+    accountId?: string;
+    workflowRunId?: string;
+    workflowStep?: string;
     batchId?: string;
     autoTargetSuccess?: number;
     autoMaxAttempts?: number;
@@ -45,8 +50,10 @@ interface RegisterTask {
     mailboxUrl?: string;
     emailRaw?: string;
     oaProxyUrl?: string;
+    oaTarget?: OaTarget;
     sub2apiAccount?: string;
     sub2apiGroup?: string;
+    cpaAccount?: string;
     sourceAccessTokenHash?: string;
     accessTokenHash?: string;
     accessTokenPreview?: string;
@@ -76,7 +83,9 @@ interface OaEmailPoolItem {
     bindStatus: OaEmailBindStatus;
     bindPhone?: string;
     bindTaskId?: string;
+    bindTarget?: OaTarget;
     bindSub2ApiAccount?: string;
+    bindCpaAccount?: string;
     bindAccessTokenHash?: string;
     bindError?: string;
     bindUpdatedAt?: string;
@@ -88,7 +97,9 @@ interface OaEmailStatusRecord {
     status: OaEmailBindStatus;
     phone?: string;
     taskId?: string;
+    target?: OaTarget;
     sub2apiAccount?: string;
+    cpaAccount?: string;
     accessTokenHash?: string;
     error?: string;
     failureType?: string;
@@ -128,6 +139,8 @@ interface AtOaRecord {
 interface PlusJobRecord {
     localId: string;
     jobId: string;
+    accountId?: string;
+    workflowRunId?: string;
     status: string;
     clientRef: string;
     tokenHash?: string;
@@ -147,6 +160,46 @@ interface PlusJobRecord {
     createdAt: string;
     updatedAt: string;
     error?: string;
+}
+
+type WorkflowStatus = "queued" | "running" | "awaiting_plus_otp" | "success" | "failed" | "canceled";
+type WorkflowStep = "register" | "plus" | "oa" | "done";
+
+interface WorkflowRecord {
+    runId: string;
+    status: WorkflowStatus;
+    step: WorkflowStep;
+    target: OaTarget;
+    freeMode?: boolean;
+    plusEnabled: boolean;
+    paypalPhone?: string;
+    accountId?: string;
+    registerTaskId?: string;
+    plusJobLocalId?: string;
+    oaTaskId?: string;
+    tokenHash?: string;
+    phone?: string;
+    bindEmail?: string;
+    sub2apiAccount?: string;
+    cpaAccount?: string;
+    error?: string;
+    createdAt: string;
+    updatedAt: string;
+    finishedAt?: string;
+    options: {
+        registerConcurrency: number;
+        oaConcurrency: number;
+        removeTokenOnPlusSuccess: boolean;
+        removeTokenOnOaSuccess: boolean;
+        tokenOut?: string;
+        password?: string;
+        oaProxyUrl?: string;
+        sub2apiGroup?: string;
+        sentinelBrowserProxy?: string;
+        sentinelBrowserPath?: string;
+        mode?: string;
+    };
+    logs: string[];
 }
 
 interface PpxyConfig {
@@ -177,15 +230,19 @@ const dataDir = path.join(rootDir, ".web-data");
 const logDir = path.join(dataDir, "logs");
 const tasksFile = path.join(dataDir, "register-tasks.json");
 const plusJobsFile = path.join(dataDir, "plus-jobs.json");
+const workflowsFile = path.join(dataDir, "workflows.json");
 const atMetaFile = path.join(dataDir, "at-meta.json");
 const oaEmailPoolFile = path.join(dataDir, "oa-email-pool.txt");
 const oaEmailStatusFile = path.join(dataDir, "oa-email-status.json");
 const agentQuickDocFile = path.join(rootDir, "AGENT-QUICK-UNDERSTANDING.md");
 const agentFullDocFile = path.join(rootDir, "AGENT-INTEGRATION.md");
 
+const accountLedger = createAccountLedger(dataDir);
 const registerTasks = new Map<string, RuntimeRegisterTask>();
 const plusJobs = new Map<string, PlusJobRecord>();
+const workflows = new Map<string, WorkflowRecord>();
 const pollingPlusJobs = new Set<string>();
+const runningWorkflows = new Set<string>();
 const smsCancelInFlight = new Set<string>();
 let registerQueue: RuntimeRegisterTask[] = [];
 let registerRunning = 0;
@@ -218,7 +275,7 @@ function makeBatchId(prefix = "reg_batch"): string {
 }
 
 function redactCliArgs(args: string[]): string[] {
-    const secretFlags = new Set(["--password", "--sub2api-password", "--mailbox-url", "--email-raw"]);
+    const secretFlags = new Set(["--password", "--sub2api-password", "--cpa-key", "--mailbox-url", "--email-raw"]);
     const redacted: string[] = [];
     for (let i = 0; i < args.length; i += 1) {
         const arg = args[i];
@@ -273,6 +330,7 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
 
 async function loadStores(): Promise<void> {
     await ensureDataDirs();
+    await accountLedger.load();
     oaEmailStatus = await readJsonFile<OaEmailStatusStore>(oaEmailStatusFile, {emails: {}});
     if (!oaEmailStatus || typeof oaEmailStatus !== "object" || !oaEmailStatus.emails) {
         oaEmailStatus = {emails: {}};
@@ -319,6 +377,18 @@ async function loadStores(): Promise<void> {
         }
     }
 
+    const loadedWorkflows = await readJsonFile<WorkflowRecord[]>(workflowsFile, []);
+    for (const workflow of loadedWorkflows) {
+        if (workflow.status === "queued" || workflow.status === "running") {
+            workflow.status = "failed";
+            workflow.error = "server restarted before workflow finished";
+            workflow.finishedAt = workflow.finishedAt ?? nowIso();
+            workflow.updatedAt = nowIso();
+            workflow.logs = [...(workflow.logs ?? []), `[${new Date().toLocaleString()}] failed after server restart`];
+        }
+        workflows.set(workflow.runId, {...workflow, logs: workflow.logs ?? []});
+    }
+
     atMeta = await readJsonFile<AtMetaStore>(atMetaFile, {trial: {}, oa: {}});
     if (!atMeta || typeof atMeta !== "object") {
         atMeta = {trial: {}, oa: {}};
@@ -341,6 +411,10 @@ async function saveRegisterTasks(): Promise<void> {
 
 async function savePlusJobs(): Promise<void> {
     await writeJsonFile(plusJobsFile, Array.from(plusJobs.values()));
+}
+
+async function saveWorkflows(): Promise<void> {
+    await writeJsonFile(workflowsFile, Array.from(workflows.values()));
 }
 
 async function saveAtMeta(): Promise<void> {
@@ -367,6 +441,47 @@ function savePlusJobsLater(): void {
     void savePlusJobs().catch((error) => {
         console.error(`save plus jobs failed: ${error instanceof Error ? error.message : String(error)}`);
     });
+}
+
+function saveWorkflowsLater(): void {
+    void saveWorkflows().catch((error) => {
+        console.error(`save workflows failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
+}
+
+async function syncTaskToAccountLedger(task: RuntimeRegisterTask, eventType?: string): Promise<AccountRecord | null> {
+    const account = await accountLedger.upsertFromTask(task, {eventType});
+    if (account && task.accountId !== account.id) {
+        task.accountId = account.id;
+        saveRegisterTasksLater();
+    }
+    return account;
+}
+
+async function syncPlusJobToAccountLedger(job: PlusJobRecord, eventType?: string): Promise<AccountRecord | null> {
+    const account = await accountLedger.upsertFromPlusJob(job, {eventType});
+    if (account && job.accountId !== account.id) {
+        job.accountId = account.id;
+        savePlusJobsLater();
+    }
+    return account;
+}
+
+async function syncTokenToAccountLedger(token: string, tokenFile: string, issuedAt?: string): Promise<AccountRecord | null> {
+    const info = tokenInfo(token, 0);
+    return accountLedger.upsertFromToken({
+        hash: String(info.hash ?? tokenHash(token)),
+        preview: String(info.preview ?? tokenPreview(token)),
+        tokenFile,
+        email: String(info.email ?? ""),
+        phone: String(info.phone ?? ""),
+        userId: String(info.userId ?? ""),
+        plan: String(info.plan ?? ""),
+        expiresAt: String(info.expiresAt ?? ""),
+        expired: Boolean(info.expired),
+        issuedAt,
+        active: true,
+    }, {eventType: "TOKEN_POOL_RECONCILED"});
 }
 
 function parseCmdEnvFile(): Record<string, string> {
@@ -1112,6 +1227,12 @@ function getConfigSummary(): Record<string, unknown> {
             accountPriority: asNumber(config.sub2apiAccountPriority, 1),
             concurrency: asNumber(config.sub2apiConcurrency, 10),
         },
+        cpa: {
+            baseUrl: asString(config.cliproxyApiBaseUrl),
+            managementKeyPresent: Boolean(asString(config.cliproxyApiManagementKey)),
+            managementKeyMasked: asString(config.cliproxyApiManagementKey) ? maskSecret(asString(config.cliproxyApiManagementKey)) : "",
+            autoUploadAuth: Boolean(config.cliproxyApiAutoUploadAuth),
+        },
         mailApi: {
             baseUrl: getMailApiBaseUrl(),
         },
@@ -1199,6 +1320,30 @@ async function updateSub2ApiConfig(body: Record<string, unknown>): Promise<Recor
     config.sub2apiProxyName = proxyName;
     config.sub2apiAccountPriority = priority;
     config.sub2apiConcurrency = concurrency;
+
+    await writeJsonFile(configFile, config);
+    return getConfigSummary();
+}
+
+async function updateCpaConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const config = await readConfigForWrite();
+    const baseUrl = String(body.baseUrl ?? body.url ?? body.cliproxyApiBaseUrl ?? "").trim();
+    const managementKey = String(body.managementKey ?? body.key ?? body.cliproxyApiManagementKey ?? "");
+    if (!baseUrl) throw new Error("CPA 地址不能为空");
+    new URL(baseUrl);
+    if (!managementKey && !asString(config.cliproxyApiManagementKey)) {
+        throw new Error("CPA management key 不能为空");
+    }
+
+    config.cliproxyApiBaseUrl = baseUrl;
+    if (managementKey) config.cliproxyApiManagementKey = managementKey;
+    if (body.autoUploadAuth !== undefined || body.cliproxyApiAutoUploadAuth !== undefined) {
+        const rawAutoUpload = body.autoUploadAuth ?? body.cliproxyApiAutoUploadAuth;
+        config.cliproxyApiAutoUploadAuth = rawAutoUpload === true
+            || rawAutoUpload === "true"
+            || rawAutoUpload === "1"
+            || rawAutoUpload === "on";
+    }
 
     await writeJsonFile(configFile, config);
     return getConfigSummary();
@@ -1332,12 +1477,21 @@ function parseTaskOutputLine(task: RuntimeRegisterTask, line: string, options: {
     if (sub2apiCreatedMatch) {
         task.sub2apiAccount = sub2apiCreatedMatch[1].trim();
     }
-    const oaBindMatch = line.match(/\[oa-sub2api\]\s+bind_email=(.+)$/);
+    const cpaAccountMatch = line.match(/\[cpa_account\]\s+(.+)$/);
+    if (cpaAccountMatch) {
+        task.cpaAccount = cpaAccountMatch[1].trim();
+        if (allowFinish) finishTaskFromSuccessfulOutput(task, "cpa_account");
+    }
+    const cpaCreatedMatch = line.match(/CPA 已入库账号:\s+(.+)$/);
+    if (cpaCreatedMatch) {
+        task.cpaAccount = cpaCreatedMatch[1].trim();
+    }
+    const oaBindMatch = line.match(/\[oa-(?:sub2api|cpa)\]\s+bind_email=(.+)$/);
     if (oaBindMatch) {
         task.bindEmail = oaBindMatch[1].trim();
         updateTaskTitle(task);
     }
-    const oaMailboxMatch = line.match(/\[oa-sub2api\]\s+mailbox_url=(.+)$/);
+    const oaMailboxMatch = line.match(/\[oa-(?:sub2api|cpa)\]\s+mailbox_url=(.+)$/);
     if (oaMailboxMatch) {
         task.mailboxUrl = oaMailboxMatch[1].trim();
     }
@@ -1372,7 +1526,7 @@ function updateTaskTitle(task: RuntimeRegisterTask): void {
 
 function taskHasSuccessOutput(task: RuntimeRegisterTask): boolean {
     if (task.kind === "oa-sub2api") {
-        return Boolean(task.sub2apiAccount);
+        return task.oaTarget === "cpa" ? Boolean(task.cpaAccount) : Boolean(task.sub2apiAccount);
     }
     return Boolean(task.accessTokenHash);
 }
@@ -1456,6 +1610,9 @@ function finishRegisterTask(
         appendTaskLog(task, "system", "success captured; terminating lingering child process");
         killProcessTree(task.child);
     }
+    void syncTaskToAccountLedger(task, task.kind === "register" ? "REGISTER_TASK_FINISHED" : "OA_TASK_FINISHED").catch((error) => {
+        appendTaskLog(task, "system", `account ledger sync failed: ${error instanceof Error ? error.message : String(error)}`);
+    });
     maybeReplenishAutoRegisterBatch(task);
     saveRegisterTasksLater();
     scheduleRegisterTasks();
@@ -1534,6 +1691,9 @@ function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
     const count = safeNumber(body.count, 10, 1, 100);
     const concurrency = safeNumber(body.concurrency, 10, 1, 10);
     const batchId = String(body.batchId ?? "").trim() || makeBatchId();
+    const accountId = String(body.accountId ?? "").trim() || undefined;
+    const workflowRunId = String(body.workflowRunId ?? "").trim() || undefined;
+    const workflowStep = String(body.workflowStep ?? "").trim() || undefined;
     const autoTargetSuccess = body.autoTargetSuccess == null ? undefined : safeNumber(body.autoTargetSuccess, count, 1, 100);
     const autoMaxAttempts = body.autoMaxAttempts == null ? undefined : safeNumber(body.autoMaxAttempts, Math.max(count, autoTargetSuccess ?? count), 1, 300);
     registerMaxConcurrency = concurrency;
@@ -1556,6 +1716,9 @@ function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
             kind: "register",
             status: "queued",
             title: `phone register #${i + 1}`,
+            accountId: count === 1 ? accountId : undefined,
+            workflowRunId,
+            workflowStep,
             batchId,
             autoTargetSuccess,
             autoMaxAttempts,
@@ -1643,7 +1806,9 @@ function setOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {
         status,
         phone: patch.phone ?? current?.phone,
         taskId: patch.taskId ?? current?.taskId,
+        target: patch.target ?? current?.target,
         sub2apiAccount: patch.sub2apiAccount ?? current?.sub2apiAccount,
+        cpaAccount: patch.cpaAccount ?? current?.cpaAccount,
         accessTokenHash: patch.accessTokenHash ?? current?.accessTokenHash,
         error: patch.error ?? current?.error,
         note: patch.note ?? current?.note,
@@ -1652,7 +1817,9 @@ function setOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {
     if (status === "free") {
         delete next.phone;
         delete next.taskId;
+        delete next.target;
         delete next.sub2apiAccount;
+        delete next.cpaAccount;
         delete next.accessTokenHash;
         delete next.error;
     }
@@ -1663,21 +1830,43 @@ function setOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {
 async function updateOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {status?: OaEmailBindStatus}): Promise<OaEmailStatusRecord> {
     const next = setOaEmailStatus(email, patch);
     await saveOaEmailStatus();
+    await syncOaEmailStatusToAccountLedger(next, "OA_EMAIL_STATUS_UPDATED");
     return next;
+}
+
+async function syncOaEmailStatusToAccountLedger(status: OaEmailStatusRecord, eventType?: string): Promise<AccountRecord | null> {
+    return accountLedger.upsertFromEmailStatus({
+        email: status.email,
+        status: status.status,
+        phone: status.phone,
+        taskId: status.taskId,
+        target: status.target,
+        sub2apiAccount: status.sub2apiAccount,
+        cpaAccount: status.cpaAccount,
+        accessTokenHash: status.accessTokenHash,
+        error: status.error,
+        note: status.note,
+        updatedAt: status.updatedAt,
+    }, {eventType});
 }
 
 function recordOaTaskEmailStatus(task: RuntimeRegisterTask, status: OaEmailBindStatus, error = ""): void {
     if (task.kind !== "oa-sub2api" || !task.bindEmail) return;
-    setOaEmailStatus(task.bindEmail, {
+    const next = setOaEmailStatus(task.bindEmail, {
         status,
         phone: task.phone,
         taskId: task.id,
+        target: task.oaTarget || "sub2api",
         sub2apiAccount: task.sub2apiAccount,
+        cpaAccount: task.cpaAccount,
         accessTokenHash: task.accessTokenHash,
         error: error || task.error,
         note: `oauth ${status}`,
     });
     saveOaEmailStatusLater();
+    void syncOaEmailStatusToAccountLedger(next, "OA_EMAIL_STATUS_RECORDED").catch((ledgerError) => {
+        console.error(`sync oa email status failed: ${ledgerError instanceof Error ? ledgerError.message : String(ledgerError)}`);
+    });
 }
 
 function getOaEmailAssignments(): Map<string, RuntimeRegisterTask> {
@@ -1737,7 +1926,9 @@ async function readOaEmailPool(): Promise<OaEmailPoolItem[]> {
                 bindStatus,
                 bindPhone: assignedTask?.phone ?? savedStatus?.phone,
                 bindTaskId: assignedTask?.id ?? savedStatus?.taskId,
+                bindTarget: assignedTask?.oaTarget ?? savedStatus?.target,
                 bindSub2ApiAccount: savedStatus?.sub2apiAccount,
+                bindCpaAccount: savedStatus?.cpaAccount,
                 bindAccessTokenHash: savedStatus?.accessTokenHash,
                 bindError: savedStatus?.error,
                 bindUpdatedAt: savedStatus?.updatedAt,
@@ -1910,6 +2101,13 @@ function normalizeOaEmailBindStatus(value: unknown): OaEmailBindStatus {
     throw new Error("邮箱状态只能是 free/reserved/bound/failed/canceled/disabled");
 }
 
+function normalizeOaTarget(value: unknown, fallback: OaTarget = "sub2api"): OaTarget {
+    const text = String(value ?? "").trim().toLowerCase();
+    if (text === "cpa") return "cpa";
+    if (text === "sub2api" || text === "sub2-api" || text === "sub") return "sub2api";
+    return fallback;
+}
+
 function normalizeOaBindPhone(value: string): string {
     const compact = value.trim().replace(/[\s()-]/g, "");
     if (!compact) return "";
@@ -1936,7 +2134,9 @@ async function patchOaEmailStatus(email: string, body: Record<string, unknown>):
         status,
         phone,
         taskId: asString(body.taskId ?? body.bindTaskId),
+        target: normalizeOaTarget(body.target ?? body.bindTarget, getOaEmailStatus(target)?.target ?? "sub2api"),
         sub2apiAccount: asString(body.sub2apiAccount ?? body.bindSub2ApiAccount),
+        cpaAccount: asString(body.cpaAccount ?? body.bindCpaAccount),
         accessTokenHash: asString(body.accessTokenHash ?? body.bindAccessTokenHash),
         error: asString(body.error ?? body.bindError),
         note: asString(body.note ?? body.bindNote),
@@ -1963,6 +2163,7 @@ function getPhoneFromToken(token: string): string {
 }
 
 async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<RegisterTask[]> {
+    const target = normalizeOaTarget(body.target ?? body.oaTarget, "sub2api");
     const concurrency = safeNumber(body.concurrency, 1, 1, 10);
     registerMaxConcurrency = concurrency;
 
@@ -1974,23 +2175,63 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
     const oaProxyUrl = rawOaProxyUrl.toLowerCase() === "direct"
         ? ""
         : rawOaProxyUrl || getOaProxyUrl(config);
+    const cpaBaseUrl = String(body.cpaBaseUrl ?? body.cpaUrl ?? asString(config.cliproxyApiBaseUrl)).trim();
+    const cpaManagementKey = String(body.cpaManagementKey ?? body.cpaKey ?? asString(config.cliproxyApiManagementKey)).trim();
+    if (target === "cpa") {
+        if (!cpaBaseUrl) throw new Error("CPA 地址不能为空；请先保存 CPA 配置");
+        new URL(cpaBaseUrl);
+        if (!cpaManagementKey) throw new Error("CPA management key 不能为空；请先保存 CPA 配置");
+    }
     const removeTokenOnSuccess = Boolean(body.removeTokenOnSuccess);
+    const accountId = String(body.accountId ?? "").trim() || undefined;
+    const workflowRunId = String(body.workflowRunId ?? "").trim() || undefined;
+    const workflowStep = String(body.workflowStep ?? "").trim() || undefined;
     const countLimit = safeNumber(body.count, 100, 1, 500);
     const selectedHashes = Array.isArray(body.tokenHashes)
         ? body.tokenHashes.map((item) => String(item).trim()).filter(Boolean)
         : [];
-    const emails = (await readOaEmailPool()).filter((item) => item.available);
+    const selectedEmails = Array.isArray(body.emails)
+        ? body.emails.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
+        : parseStringList(body.email ?? body.bindEmail ?? body.selectedEmail).map((item) => item.toLowerCase());
+    const allAvailableEmails = (await readOaEmailPool()).filter((item) => item.available);
+    const emails = selectedEmails.length
+        ? allAvailableEmails.filter((item) => selectedEmails.includes(item.email.toLowerCase()))
+        : allAvailableEmails;
+    if (selectedEmails.length) {
+        const availableEmailSet = new Set(emails.map((item) => item.email.toLowerCase()));
+        const missingEmails = selectedEmails.filter((item) => !availableEmailSet.has(item));
+        if (missingEmails.length) {
+            throw new Error(`指定邮箱不可用或不存在：${missingEmails.join(", ")}`);
+        }
+    }
+    if (selectedHashes.length && selectedEmails.length && selectedHashes.length !== selectedEmails.length) {
+        throw new Error(`指定号码数量(${selectedHashes.length})与指定邮箱数量(${selectedEmails.length})不一致`);
+    }
     if (!emails.length) throw new Error("没有未绑定可用邮箱；请先导入 邮箱-----接码地址 或 邮箱----密码----clientId----refreshToken");
 
     const tokens = await readTokenPool();
-    const tokenItems = tokens
+    const availableTokenItems = tokens
         .map((token) => ({token, hash: tokenHash(token), phone: getPhoneFromToken(token)}))
         .filter((item) => item.phone)
-        .filter((item) => atMeta.oa[item.hash]?.enabled !== false)
+        .filter((item) => atMeta.oa[item.hash]?.enabled !== false);
+    if (selectedHashes.length) {
+        const availableHashSet = new Set(availableTokenItems.map((item) => item.hash));
+        const missingHashes = selectedHashes.filter((item) => !availableHashSet.has(item));
+        if (missingHashes.length) {
+            throw new Error(`指定号码不可用或不存在：${missingHashes.map((item) => item.slice(0, 10)).join(", ")}`);
+        }
+    }
+    const tokenItems = availableTokenItems
         .filter((item) => !selectedHashes.length || selectedHashes.includes(item.hash))
         .slice(0, Math.min(countLimit, emails.length));
     if (!tokenItems.length) {
         throw new Error("没有可用的 AT+手机号；请确认 AT 池 token 里能解析 phone_number");
+    }
+    if (selectedHashes.length && tokenItems.length < selectedHashes.length) {
+        throw new Error(`可用邮箱不足：已选 ${selectedHashes.length} 个号码，但只有 ${emails.length} 个可用邮箱`);
+    }
+    if (selectedEmails.length && tokenItems.length < selectedEmails.length) {
+        throw new Error(`可用号码不足：已选 ${selectedEmails.length} 个邮箱，但只有 ${tokenItems.length} 个可用 AT+手机号`);
     }
 
     await assertOaOpenAiReachable(oaProxyUrl);
@@ -1999,13 +2240,17 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
     envBase.OPENAI_PROXY_URL = oaProxyUrl;
     envBase.DEFAULT_PROXY_URL = oaProxyUrl;
     envBase.SENTINEL_BROWSER_PROXY = oaProxyUrl;
+    if (target === "cpa") {
+        envBase.CPA_BASE_URL = cpaBaseUrl;
+        envBase.CPA_MANAGEMENT_KEY = cpaManagementKey;
+    }
     const created: RegisterTask[] = [];
     for (let i = 0; i < tokenItems.length; i += 1) {
         const tokenItem = tokenItems[i];
         const emailItem = emails[i];
         const id = `oa_${Date.now()}_${randomUUID().slice(0, 8)}`;
         const args = [
-            "src/oa-sub2api.ts",
+            target === "cpa" ? "src/oa-cpa.ts" : "src/oa-sub2api.ts",
             "--st",
             "--phone", tokenItem.phone,
             "--bind-email", emailItem.email,
@@ -2030,6 +2275,9 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
             kind: "oa-sub2api",
             status: "queued",
             title: `OA ${tokenItem.phone} -> ${emailItem.email}`,
+            accountId: tokenItems.length === 1 ? accountId : undefined,
+            workflowRunId,
+            workflowStep,
             createdAt: nowIso(),
             updatedAt: nowIso(),
             args,
@@ -2039,10 +2287,11 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
             mailboxUrl: emailItem.mailboxUrl,
             emailRaw: emailItem.raw,
             oaProxyUrl: maskUrlSecret(oaProxyUrl),
+            oaTarget: target,
             sourceAccessTokenHash: tokenItem.hash,
             accessTokenHash: tokenItem.hash,
             accessTokenPreview: tokenPreview(tokenItem.token),
-            sub2apiGroup: String(body.sub2apiGroup || asString(config.sub2apiGroupName, "codex")),
+            sub2apiGroup: target === "sub2api" ? String(body.sub2apiGroup || asString(config.sub2apiGroupName, "codex")) : undefined,
             logs: [],
             env: envBase,
         };
@@ -2052,11 +2301,12 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
             status: "reserved",
             phone: tokenItem.phone,
             taskId: id,
+            target,
             accessTokenHash: tokenItem.hash,
-            note: "queued oa-sub2api",
+            note: `queued oa-${target}`,
         });
         created.push(task);
-        appendTaskLog(task, "system", `queued oa-sub2api phone=${tokenItem.phone} bindEmail=${emailItem.email} proxy=${maskUrlSecret(oaProxyUrl) || "direct"}`);
+        appendTaskLog(task, "system", `queued oa-${target} phone=${tokenItem.phone} bindEmail=${emailItem.email} proxy=${maskUrlSecret(oaProxyUrl) || "direct"}${target === "cpa" ? ` cpa=${maskUrlSecret(cpaBaseUrl)}` : ""}`);
     }
     saveOaEmailStatusLater();
     saveRegisterTasksLater();
@@ -2327,6 +2577,10 @@ async function importTokens(raw: string): Promise<{added: number; skipped: numbe
     }
     if (added.length) {
         await writeTokenPool([...existing, ...added]);
+        const tokenFile = getPpxyConfig().tokenFile;
+        for (const token of added) {
+            await syncTokenToAccountLedger(token, tokenFile);
+        }
     }
     return {added: added.length, skipped: incoming.length - added.length, total: existing.length + added.length};
 }
@@ -2336,6 +2590,7 @@ async function removeTokenByHash(hash: string): Promise<boolean> {
     const next = tokens.filter((token) => tokenHash(token) !== hash);
     if (next.length === tokens.length) return false;
     await writeTokenPool(next);
+    await accountLedger.markTokenActive(hash, false, {eventType: "AT_REMOVED_FROM_POOL"});
     return true;
 }
 
@@ -2475,6 +2730,8 @@ async function createPlusJob(body: Record<string, unknown>): Promise<PlusJobReco
     const record: PlusJobRecord = {
         localId: `plus_${Date.now()}_${randomUUID().slice(0, 8)}`,
         jobId,
+        accountId: String(body.accountId ?? "").trim() || undefined,
+        workflowRunId: String(body.workflowRunId ?? "").trim() || undefined,
         status: String(data.status ?? "queued"),
         clientRef,
         tokenHash: tokenHashFromBody || hash,
@@ -2495,6 +2752,7 @@ async function createPlusJob(body: Record<string, unknown>): Promise<PlusJobReco
     };
     plusJobs.set(record.localId, record);
     await savePlusJobs();
+    await syncPlusJobToAccountLedger(record, "PLUS_JOB_CREATED");
     startPlusPolling(record.localId);
     return record;
 }
@@ -2529,6 +2787,7 @@ async function refreshPlusJob(record: PlusJobRecord): Promise<PlusJobRecord> {
         record.updatedAt = nowIso();
     }
     await savePlusJobs();
+    await syncPlusJobToAccountLedger(record, record.done ? "PLUS_JOB_FINISHED" : "PLUS_JOB_UPDATED");
     return record;
 }
 
@@ -2573,8 +2832,278 @@ async function submitPlusOtp(record: PlusJobRecord, pin: string): Promise<unknow
     record.response = result.data;
     record.updatedAt = nowIso();
     await savePlusJobs();
+    await syncPlusJobToAccountLedger(record, "PLUS_OTP_SUBMITTED");
     startPlusPolling(record.localId);
     return result.data;
+}
+
+function workflowLog(workflow: WorkflowRecord, message: string): void {
+    workflow.logs.push(`[${new Date().toLocaleString()}] ${message}`);
+    if (workflow.logs.length > 300) workflow.logs.splice(0, workflow.logs.length - 300);
+    workflow.updatedAt = nowIso();
+}
+
+function publicWorkflow(workflow: WorkflowRecord): WorkflowRecord {
+    return {...workflow, logs: workflow.logs.slice(-200)};
+}
+
+async function waitForRegisterTask(taskId: string, workflow: WorkflowRecord): Promise<RuntimeRegisterTask> {
+    for (;;) {
+        const task = registerTasks.get(taskId);
+        if (!task) throw new Error(`task not found: ${taskId}`);
+        if (task.status === "success") return task;
+        if (task.status === "failed" || task.status === "canceled") {
+            throw new Error(task.error || `task ${task.id} ${task.status}`);
+        }
+        if (workflow.status === "canceled") throw new Error("workflow canceled");
+        await delay(2500);
+    }
+}
+
+async function waitForPlusJob(jobLocalId: string, workflow: WorkflowRecord): Promise<PlusJobRecord | "awaiting_plus_otp"> {
+    for (;;) {
+        const job = plusJobs.get(jobLocalId);
+        if (!job) throw new Error(`plus job not found: ${jobLocalId}`);
+        await refreshPlusJob(job);
+        if (job.otpPending && !job.done) return "awaiting_plus_otp";
+        if (job.done || job.status === "success" || job.status === "failed") return job;
+        if (workflow.status === "canceled") throw new Error("workflow canceled");
+        await delay(5000);
+    }
+}
+
+async function runPhonePlusOaWorkflow(runId: string): Promise<void> {
+    if (runningWorkflows.has(runId)) return;
+    const workflow = workflows.get(runId);
+    if (!workflow || ["success", "failed", "canceled"].includes(workflow.status)) return;
+    runningWorkflows.add(runId);
+    try {
+        workflow.status = "running";
+        workflowLog(workflow, `workflow running step=${workflow.step}`);
+        saveWorkflowsLater();
+
+        if (!workflow.registerTaskId) {
+            workflow.step = "register";
+            workflowLog(workflow, "create register task");
+            const [task] = createRegisterTasks({
+                count: 1,
+                concurrency: workflow.options.registerConcurrency,
+                tokenOut: workflow.options.tokenOut,
+                sentinelBrowserProxy: workflow.options.sentinelBrowserProxy,
+                sentinelBrowserPath: workflow.options.sentinelBrowserPath,
+                accountId: workflow.accountId,
+                workflowRunId: workflow.runId,
+                workflowStep: "register",
+            }) as RuntimeRegisterTask[];
+            workflow.registerTaskId = task.id;
+            workflow.accountId = task.accountId;
+            saveWorkflowsLater();
+        }
+
+        const registerTask = await waitForRegisterTask(workflow.registerTaskId, workflow);
+        const account = await syncTaskToAccountLedger(registerTask, "WORKFLOW_REGISTER_DONE");
+        workflow.accountId = account?.id ?? workflow.accountId;
+        workflow.phone = registerTask.phone ?? workflow.phone;
+        workflow.tokenHash = registerTask.accessTokenHash ?? workflow.tokenHash;
+        if (!workflow.tokenHash) throw new Error("register task succeeded but no access token hash was captured");
+        workflowLog(workflow, `register success phone=${workflow.phone || ""} token=${workflow.tokenHash.slice(0, 12)}`);
+
+        if (workflow.plusEnabled) {
+            workflow.step = "plus";
+            if (!workflow.plusJobLocalId) {
+                if (!workflow.paypalPhone) throw new Error("paypalPhone is required when plus=true");
+                workflowLog(workflow, "create plus job");
+                const job = await createPlusJob({
+                    tokenHash: workflow.tokenHash,
+                    paypalPhone: workflow.paypalPhone,
+                    removeTokenOnSuccess: workflow.options.removeTokenOnPlusSuccess,
+                    accountId: workflow.accountId,
+                    workflowRunId: workflow.runId,
+                });
+                workflow.plusJobLocalId = job.localId;
+                saveWorkflowsLater();
+            }
+            const plusResult = await waitForPlusJob(workflow.plusJobLocalId, workflow);
+            if (plusResult === "awaiting_plus_otp") {
+                workflow.status = "awaiting_plus_otp";
+                workflowLog(workflow, "plus job is waiting for OTP");
+                saveWorkflowsLater();
+                await accountLedger.appendEvent({
+                    type: "WORKFLOW_AWAITING_PLUS_OTP",
+                    accountId: workflow.accountId ?? "",
+                    source: "workflow",
+                    sourceId: workflow.runId,
+                    payload: {plusJobLocalId: workflow.plusJobLocalId},
+                });
+                return;
+            }
+            await syncPlusJobToAccountLedger(plusResult, "WORKFLOW_PLUS_DONE");
+            if (!isPlusJobSuccess(plusResult)) {
+                throw new Error(plusResult.errorMessage || plusResult.error || `plus job ${plusResult.status}`);
+            }
+            workflowLog(workflow, `plus success job=${plusResult.localId}`);
+        }
+
+        workflow.step = "oa";
+        if (!workflow.oaTaskId) {
+            workflowLog(workflow, `create oa task target=${workflow.target}`);
+            const [oaTask] = await createOaSub2ApiTasks({
+                count: 1,
+                concurrency: workflow.options.oaConcurrency,
+                target: workflow.target,
+                tokenHashes: [workflow.tokenHash],
+                removeTokenOnSuccess: workflow.options.removeTokenOnOaSuccess,
+                accountId: workflow.accountId,
+                workflowRunId: workflow.runId,
+                workflowStep: "oa",
+                password: workflow.options.password,
+                oaProxyUrl: workflow.options.oaProxyUrl,
+                sub2apiGroup: workflow.options.sub2apiGroup,
+            }) as RuntimeRegisterTask[];
+            workflow.oaTaskId = oaTask.id;
+            workflow.bindEmail = oaTask.bindEmail;
+            saveWorkflowsLater();
+        }
+
+        const oaTask = await waitForRegisterTask(workflow.oaTaskId, workflow);
+        await syncTaskToAccountLedger(oaTask, "WORKFLOW_OA_DONE");
+        workflow.bindEmail = oaTask.bindEmail ?? workflow.bindEmail;
+        workflow.sub2apiAccount = oaTask.sub2apiAccount;
+        workflow.cpaAccount = oaTask.cpaAccount;
+        if (workflow.freeMode || (!workflow.plusEnabled && workflow.target === "sub2api")) {
+            await accountLedger.markFree(
+                {
+                    id: workflow.accountId,
+                    tokenHash: workflow.tokenHash,
+                    phone: workflow.phone,
+                    oaTaskId: workflow.oaTaskId,
+                },
+                {
+                    workflowRunId: workflow.runId,
+                    completedAt: oaTask.finishedAt ?? nowIso(),
+                    target: workflow.target,
+                    note: "完全 free 流程：注册后直接 OA/SUB2API，跳过 Plus",
+                },
+                {eventType: "WORKFLOW_FREE_DONE"},
+            );
+        }
+        workflow.step = "done";
+        workflow.status = "success";
+        workflow.finishedAt = nowIso();
+        workflowLog(workflow, `workflow success email=${workflow.bindEmail || ""}`);
+        await accountLedger.appendEvent({
+            type: "WORKFLOW_SUCCESS",
+            accountId: workflow.accountId ?? "",
+            source: "workflow",
+            sourceId: workflow.runId,
+            payload: {
+                phone: workflow.phone,
+                tokenHash: workflow.tokenHash,
+                bindEmail: workflow.bindEmail,
+                target: workflow.target,
+                sub2apiAccount: workflow.sub2apiAccount,
+                cpaAccount: workflow.cpaAccount,
+            },
+        });
+    } catch (error) {
+        workflow.status = "failed";
+        workflow.error = error instanceof Error ? error.message : String(error);
+        workflow.finishedAt = nowIso();
+        workflowLog(workflow, `workflow failed: ${workflow.error}`);
+        if (workflow.accountId) {
+            await accountLedger.appendEvent({
+                type: "WORKFLOW_FAILED",
+                accountId: workflow.accountId,
+                source: "workflow",
+                sourceId: workflow.runId,
+                payload: {error: workflow.error, step: workflow.step},
+            });
+        }
+    } finally {
+        workflows.set(workflow.runId, workflow);
+        saveWorkflowsLater();
+        runningWorkflows.delete(runId);
+    }
+}
+
+async function createPhonePlusOaWorkflow(body: Record<string, unknown>): Promise<WorkflowRecord> {
+    const plusEnabled = body.plus !== false && body.plusEnabled !== false;
+    const paypalPhone = String(body.paypalPhone ?? body.paypal ?? "").trim();
+    if (plusEnabled && !paypalPhone) {
+        throw new Error("paypalPhone is required for phone -> plus -> OA workflow");
+    }
+    const now = nowIso();
+    const workflow: WorkflowRecord = {
+        runId: `wf_${Date.now()}_${randomUUID().slice(0, 8)}`,
+        status: "queued",
+        step: "register",
+        target: normalizeOaTarget(body.target ?? body.oaTarget, "sub2api"),
+        freeMode: body.freeMode === true || String(body.mode ?? "").trim().toLowerCase() === "free",
+        plusEnabled,
+        paypalPhone,
+        accountId: String(body.accountId ?? "").trim() || undefined,
+        createdAt: now,
+        updatedAt: now,
+        options: {
+            registerConcurrency: safeNumber(body.registerConcurrency ?? body.concurrency, 1, 1, 10),
+            oaConcurrency: safeNumber(body.oaConcurrency ?? body.concurrency, 1, 1, 10),
+            removeTokenOnPlusSuccess: body.removeTokenOnPlusSuccess === true,
+            removeTokenOnOaSuccess: body.removeTokenOnOaSuccess === true || body.removeTokenOnSuccess === true,
+            tokenOut: String(body.tokenOut ?? "").trim() || undefined,
+            password: String(body.password ?? "").trim() || undefined,
+            oaProxyUrl: String(body.oaProxyUrl ?? body.openaiProxyUrl ?? body.proxyUrl ?? "").trim() || undefined,
+            sub2apiGroup: String(body.sub2apiGroup ?? "").trim() || undefined,
+            sentinelBrowserProxy: String(body.sentinelBrowserProxy ?? "").trim() || undefined,
+            sentinelBrowserPath: String(body.sentinelBrowserPath ?? "").trim() || undefined,
+            mode: String(body.mode ?? "").trim() || undefined,
+        },
+        logs: [],
+    };
+    workflowLog(workflow, `queued target=${workflow.target} plus=${workflow.plusEnabled}`);
+    workflows.set(workflow.runId, workflow);
+    await saveWorkflows();
+    void runPhonePlusOaWorkflow(workflow.runId);
+    return workflow;
+}
+
+async function reconcileAccountLedger(): Promise<Record<string, unknown>> {
+    let tasks = 0;
+    let plus = 0;
+    let tokens = 0;
+    let emailStatuses = 0;
+    for (const task of Array.from(registerTasks.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+        const account = await accountLedger.upsertFromTask(task, {eventType: "RECONCILE_TASK", emitEvent: false});
+        if (account && task.accountId !== account.id) {
+            task.accountId = account.id;
+            tasks += 1;
+        }
+    }
+    const tokenFile = getPpxyConfig().tokenFile;
+    for (const token of await readTokenPool()) {
+        await syncTokenToAccountLedger(token, tokenFile);
+        tokens += 1;
+    }
+    for (const job of Array.from(plusJobs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+        const account = await accountLedger.upsertFromPlusJob(job, {eventType: "RECONCILE_PLUS", emitEvent: false});
+        if (account && job.accountId !== account.id) {
+            job.accountId = account.id;
+            plus += 1;
+        }
+    }
+    for (const status of Object.values(oaEmailStatus.emails)) {
+        const account = await syncOaEmailStatusToAccountLedger(status, "RECONCILE_OA_EMAIL_STATUS");
+        if (account) emailStatuses += 1;
+    }
+    if (tasks) saveRegisterTasksLater();
+    if (plus) savePlusJobsLater();
+    await accountLedger.save();
+    return {
+        linkedTasks: tasks,
+        linkedPlusJobs: plus,
+        scannedTokens: tokens,
+        scannedEmailStatuses: emailStatuses,
+        summary: await accountLedger.summary(),
+    };
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -2642,6 +3171,7 @@ async function getSystemSummary(): Promise<Record<string, unknown>> {
     const tokens = await readTokenPool();
     const atItems = tokens.map(tokenInfo);
     const oaEmails = await readOaEmailPool();
+    const accountSummary = await accountLedger.summary();
     const registerOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "register");
     const oaOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "oa-sub2api");
     const registerStatuses = groupCounts(registerOnly.map((task) => task.status));
@@ -2681,6 +3211,13 @@ async function getSystemSummary(): Promise<Record<string, unknown>> {
             otpPending: Array.from(plusJobs.values()).filter((job) => job.otpPending || job.status === "otp_pending").length,
             successToday: Array.from(plusJobs.values()).filter((job) => job.status === "success" && job.updatedAt?.startsWith(todayPrefix)).length,
         },
+        accounts: accountSummary,
+        workflows: {
+            total: workflows.size,
+            statuses: groupCounts(Array.from(workflows.values()).map((workflow) => workflow.status)),
+            running: Array.from(workflows.values()).filter((workflow) => workflow.status === "running").length,
+            awaitingPlusOtp: Array.from(workflows.values()).filter((workflow) => workflow.status === "awaiting_plus_otp").length,
+        },
     };
 }
 
@@ -2714,12 +3251,14 @@ async function sendAgentDocs(res: ServerResponse): Promise<void> {
 async function serveStatic(url: URL, res: ServerResponse): Promise<boolean> {
     const routes: Record<string, string> = {
         "/": "index.html",
+        "/accounts": "accounts.html",
         "/register": "register.html",
         "/plus": "plus.html",
         "/oa": "oa.html",
         "/styles.css": "styles.css",
         "/theme.js": "theme.js",
         "/agent.js": "agent.js",
+        "/accounts.js": "accounts.js",
         "/register.js": "register.js",
         "/plus.js": "plus.js",
         "/oa.js": "oa.js",
@@ -2921,6 +3460,116 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
+    if (method === "GET" && pathname === "/api/accounts") {
+        sendJson(res, 200, {
+            summary: await accountLedger.summary(),
+            accounts: await accountLedger.list(),
+        });
+        return;
+    }
+
+    const accountLookupMatch = pathname.match(/^\/api\/accounts\/(by-token|by-phone|by-email)\/(.+)$/);
+    if (accountLookupMatch && method === "GET") {
+        const mode = accountLookupMatch[1];
+        const value = decodeURIComponent(accountLookupMatch[2]);
+        const account = await accountLedger.find({
+            tokenHash: mode === "by-token" ? value : undefined,
+            phone: mode === "by-phone" ? value : undefined,
+            email: mode === "by-email" ? value : undefined,
+        });
+        if (!account) {
+            sendJson(res, 404, {error: "account not found"});
+            return;
+        }
+        sendJson(res, 200, {account});
+        return;
+    }
+
+    const accountMatch = pathname.match(/^\/api\/accounts\/([^/]+)$/);
+    if (accountMatch && method === "GET") {
+        const account = await accountLedger.get(decodeURIComponent(accountMatch[1]));
+        if (!account) {
+            sendJson(res, 404, {error: "account not found"});
+            return;
+        }
+        sendJson(res, 200, {account});
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/reconcile") {
+        sendJson(res, 200, await reconcileAccountLedger());
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/workflows") {
+        sendJson(res, 200, {
+            workflows: Array.from(workflows.values()).map(publicWorkflow).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+        });
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/workflows/phone-plus-oa") {
+        try {
+            const body = await readJsonBody(req);
+            sendJson(res, 201, {workflow: publicWorkflow(await createPhonePlusOaWorkflow(body))});
+        } catch (error) {
+            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+        }
+        return;
+    }
+
+    const workflowMatch = pathname.match(/^\/api\/workflows\/([^/]+)(?:\/(plus-otp|resume|cancel))?$/);
+    if (workflowMatch) {
+        const workflow = workflows.get(decodeURIComponent(workflowMatch[1]));
+        if (!workflow) {
+            sendJson(res, 404, {error: "workflow not found"});
+            return;
+        }
+        const action = workflowMatch[2] ?? "";
+        if (method === "GET" && !action) {
+            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
+            return;
+        }
+        if (method === "POST" && action === "plus-otp") {
+            try {
+                const body = await readJsonBody(req);
+                if (!workflow.plusJobLocalId) throw new Error("workflow has no plus job");
+                const job = plusJobs.get(workflow.plusJobLocalId);
+                if (!job) throw new Error("plus job not found");
+                const result = await submitPlusOtp(job, String(body.pin || body.otp || ""));
+                workflow.status = "running";
+                workflowLog(workflow, "plus OTP submitted; resume workflow");
+                saveWorkflowsLater();
+                void runPhonePlusOaWorkflow(workflow.runId);
+                sendJson(res, 200, {result, workflow: publicWorkflow(workflow), job});
+            } catch (error) {
+                sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+            }
+            return;
+        }
+        if (method === "POST" && action === "resume") {
+            if (workflow.status === "success" || workflow.status === "canceled") {
+                sendJson(res, 409, {error: `workflow is ${workflow.status}`});
+                return;
+            }
+            workflow.status = "running";
+            workflow.error = undefined;
+            workflowLog(workflow, "manual resume requested");
+            saveWorkflowsLater();
+            void runPhonePlusOaWorkflow(workflow.runId);
+            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
+            return;
+        }
+        if (method === "POST" && action === "cancel") {
+            workflow.status = "canceled";
+            workflow.finishedAt = nowIso();
+            workflowLog(workflow, "manual cancel requested");
+            saveWorkflowsLater();
+            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
+            return;
+        }
+    }
+
     if (method === "GET" && pathname === "/api/register/password") {
         sendJson(res, 200, getRegisterPasswordView());
         return;
@@ -2956,6 +3605,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if ((method === "PATCH" || method === "POST") && pathname === "/api/config/sub2api") {
         const body = await readJsonBody(req);
         sendJson(res, 200, await updateSub2ApiConfig(body));
+        return;
+    }
+
+    if ((method === "PATCH" || method === "POST") && pathname === "/api/config/cpa") {
+        const body = await readJsonBody(req);
+        sendJson(res, 200, await updateCpaConfig(body));
         return;
     }
 

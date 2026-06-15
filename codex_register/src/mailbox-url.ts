@@ -1,6 +1,6 @@
 import {createHash} from "node:crypto";
 
-const CODE_PATTERN = /\b\d{4,8}\b/;
+const CODE_PATTERN = /\b\d{6}\b/;
 
 export interface MailboxSnapshot {
     hash: string;
@@ -16,6 +16,32 @@ export interface MailboxWaitOptions {
 
 function asString(value: unknown): string {
     return typeof value === "string" ? value.trim() : "";
+}
+
+function decodeHtmlEntities(value: string): string {
+    return value
+        .replace(/&#(\d+);/g, (_, codePoint) => String.fromCharCode(Number(codePoint)))
+        .replace(/&#x([0-9a-f]+);/gi, (_, codePoint) => String.fromCharCode(parseInt(codePoint, 16)))
+        .replace(/&nbsp;/gi, " ")
+        .replace(/&amp;/gi, "&")
+        .replace(/&lt;/gi, "<")
+        .replace(/&gt;/gi, ">")
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/g, "'");
+}
+
+function normalizeTextForCodeMatching(value: string): string {
+    return decodeHtmlEntities(String(value ?? ""))
+        .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+        .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+        .replace(/<[^>]+>/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+function normalizeSixDigitCode(value: string | undefined): string {
+    const digitsOnly = String(value ?? "").replace(/\D/g, "");
+    return digitsOnly.length === 6 ? digitsOnly : "";
 }
 
 function findCodeInJson(value: unknown): string {
@@ -64,7 +90,22 @@ function findCodeInJson(value: unknown): string {
 }
 
 function normalizeCode(value: unknown): string {
-    const match = asString(value).match(CODE_PATTERN);
+    const raw = asString(value);
+    if (!raw) return "";
+
+    const text = normalizeTextForCodeMatching(raw);
+    const contextPatterns = [
+        /\b(?:temporary\s+)?verification\s+code\b.{0,160}?\b((?:\d[\s-]*){6})\b/i,
+        /\b(?:enter|use|your|OpenAI|ChatGPT|verification|security|login|sign[-\s]?in|code|验证码)\b.{0,160}?\b((?:\d[\s-]*){6})\b/i,
+        /\b((?:\d[\s-]*){6})\b.{0,100}?\b(?:OpenAI|ChatGPT|verification|security|login|sign[-\s]?in|code|验证码)\b/i,
+    ];
+    for (const pattern of contextPatterns) {
+        const match = text.match(pattern);
+        const code = normalizeSixDigitCode(match?.[1]);
+        if (code) return code;
+    }
+
+    const match = text.match(CODE_PATTERN);
     return match?.[0] ?? "";
 }
 
@@ -77,6 +118,10 @@ function extractCode(raw: string): string {
         // Fallback to raw text parsing.
     }
     return normalizeCode(raw);
+}
+
+export function extractMailboxCodeFromRaw(raw: string): string {
+    return extractCode(raw);
 }
 
 function findReceivedAtInJson(value: unknown): string {

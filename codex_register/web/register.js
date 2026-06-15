@@ -2,6 +2,7 @@ const $ = (selector) => document.querySelector(selector);
 
 let tasksCache = [];
 let selectedTaskId = "";
+let selectedBatchTaskId = "";
 let configCache = null;
 let platformPriceItems = [];
 let smsCountriesByProvider = {};
@@ -165,9 +166,7 @@ function renderAgentDashboard(summary, batches) {
   document.querySelectorAll("[data-batch-filter]").forEach((button) => {
     button.addEventListener("click", () => {
       const batchId = button.dataset.batchFilter;
-      taskStatusFilter = "all";
-      renderTable(batchId);
-      toast(`\u5df2\u7b5b\u9009\u6279\u6b21 ${batchId}`);
+      renderBatchTaskModal(batchId);
     });
   });
 }
@@ -258,6 +257,7 @@ function taskRow(task) {
     ? `<button class="ghost small" data-delete="${task.id}">删除</button>`
     : "";
   const open = `<button class="small" data-open="${task.id}">日志</button>`;
+  const diagnosis = `<button class="ghost small" data-diagnosis="${task.id}">诊断</button>`;
   const successFile = successTextFileForTask(task);
   const successNote = task.status === "success"
     ? `<div class="task-note success-text">成功结果：${escapeHtml(successFile || task.tokenOut || "")}</div>`
@@ -283,6 +283,48 @@ function taskRow(task) {
       <td><div class="row actions">${open}${diagnosis}${cancel}${del}</div></td>
     </tr>
   `;
+}
+
+function taskStatusCounts(items) {
+  return {
+    total: items.length,
+    running: items.filter((task) => ["queued", "running"].includes(task.status)).length,
+    failed: items.filter((task) => task.status === "failed").length,
+    success: items.filter((task) => task.status === "success").length,
+    canceled: items.filter((task) => task.status === "canceled").length,
+  };
+}
+
+function renderBatchTaskModal(batchId) {
+  const modal = $("#batch-task-modal");
+  if (!modal) return;
+  const normalizedBatchId = batchId || "legacy";
+  const batch = registerBatchesCache.find((item) => (item.batchId || "legacy") === normalizedBatchId);
+  const items = tasksCache.filter((task) => (task.batchId || "legacy") === normalizedBatchId);
+  const counts = taskStatusCounts(items);
+  const statusText = [
+    `全部 ${counts.total}`,
+    `运行中 ${counts.running}`,
+    `失败 ${counts.failed}`,
+    `成功 ${counts.success}`,
+    counts.canceled ? `取消 ${counts.canceled}` : "",
+  ].filter(Boolean).join(" / ");
+
+  selectedBatchTaskId = normalizedBatchId;
+  $("#batch-task-modal-title").textContent = `批次任务 · ${normalizedBatchId}`;
+  $("#batch-task-modal-subtitle").textContent = batch
+    ? `${batch.done ? "已结束" : "进行中"} / ${statusText}`
+    : statusText;
+  $("#batch-task-modal-list").innerHTML = items.length
+    ? items.map(taskRow).join("")
+    : `<tr><td colspan="6"><div class="empty">这个批次暂无任务</div></td></tr>`;
+  modal.classList.remove("hidden");
+  bindTableActions($("#batch-task-modal-list"));
+}
+
+function closeBatchTaskModal() {
+  selectedBatchTaskId = "";
+  $("#batch-task-modal")?.classList.add("hidden");
 }
 
 function renderDiagnosis(task, diagnosis) {
@@ -388,8 +430,8 @@ async function saveRegisterPassword(event) {
   }
 }
 
-function bindTableActions() {
-  document.querySelectorAll("tr[data-id]").forEach((row) => {
+function bindTableActions(root = document) {
+  root.querySelectorAll("tr[data-id]").forEach((row) => {
     row.addEventListener("click", (event) => {
       if (event.target.closest("button")) return;
       const task = tasksCache.find((item) => item.id === row.dataset.id);
@@ -398,7 +440,7 @@ function bindTableActions() {
     });
   });
 
-  document.querySelectorAll("[data-open]").forEach((btn) => {
+  root.querySelectorAll("[data-open]").forEach((btn) => {
     btn.addEventListener("click", (event) => {
       event.stopPropagation();
       const task = tasksCache.find((item) => item.id === btn.dataset.open);
@@ -407,7 +449,7 @@ function bindTableActions() {
     });
   });
 
-  document.querySelectorAll("[data-diagnosis]").forEach((btn) => {
+  root.querySelectorAll("[data-diagnosis]").forEach((btn) => {
     btn.addEventListener("click", async (event) => {
       event.stopPropagation();
       const task = tasksCache.find((item) => item.id === btn.dataset.diagnosis);
@@ -417,7 +459,7 @@ function bindTableActions() {
     });
   });
 
-  document.querySelectorAll("[data-cancel]").forEach((btn) => {
+  root.querySelectorAll("[data-cancel]").forEach((btn) => {
     btn.addEventListener("click", async (event) => {
       event.stopPropagation();
       await api(`/api/tasks/${btn.dataset.cancel}/cancel`, {method: "POST", body: "{}"});
@@ -426,7 +468,7 @@ function bindTableActions() {
     });
   });
 
-  document.querySelectorAll("[data-delete]").forEach((btn) => {
+  root.querySelectorAll("[data-delete]").forEach((btn) => {
     btn.addEventListener("click", async (event) => {
       event.stopPropagation();
       await api(`/api/tasks/${btn.dataset.delete}`, {method: "DELETE"});
@@ -476,7 +518,7 @@ function renderTable(batchId = "") {
     : `<tr><td colspan="6"><div class="empty">当前筛选下暂无任务</div></td></tr>`;
   updateBulkDeleteButtons();
   updateTaskFilterCounts();
-  bindTableActions();
+  bindTableActions($("#tasks"));
 }
 
 function deletableTasksByStatuses(statuses) {
@@ -523,6 +565,10 @@ async function loadTasks() {
   if (!$("#log-modal").classList.contains("hidden") && selectedTaskId) {
     const selected = tasksCache.find((task) => task.id === selectedTaskId);
     if (selected) renderLogs(selected);
+  }
+
+  if (!$("#batch-task-modal")?.classList.contains("hidden") && selectedBatchTaskId) {
+    renderBatchTaskModal(selectedBatchTaskId);
   }
 }
 
@@ -859,6 +905,7 @@ async function saveDefaultProxy(proxyUrl) {
 
 function switchRegisterView(view) {
   registerView = view === "batches" ? "batches" : "tasks";
+  $(".list-card")?.classList.toggle("showing-batches", registerView === "batches");
   document.querySelectorAll("[data-register-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.registerView === registerView);
   });
@@ -911,6 +958,31 @@ $("#start-form").addEventListener("submit", async (event) => {
   const body = Object.fromEntries(form.entries());
   body.count = Number(body.count || 1);
   body.concurrency = Number(body.concurrency || 1);
+  const freeFlowMode = Boolean($("#freeFlowMode")?.checked);
+  if (freeFlowMode) {
+    const total = Math.max(1, Math.min(100, body.count));
+    for (let index = 0; index < total; index += 1) {
+      await api("/api/workflows/phone-plus-oa", {
+        method: "POST",
+        body: JSON.stringify({
+          target: "sub2api",
+          plus: false,
+          freeMode: true,
+          mode: "free",
+          concurrency: body.concurrency,
+          registerConcurrency: body.concurrency,
+          oaConcurrency: 1,
+          tokenOut: body.tokenOut,
+          sentinelBrowserProxy: body.sentinelBrowserProxy,
+          sentinelBrowserPath: body.sentinelBrowserPath,
+        }),
+      });
+    }
+    toast(`完全 free 流程已加入队列：${total} 个`);
+    await loadTasks();
+    await loadAgentDashboard().catch(() => undefined);
+    return;
+  }
   await api("/api/register/tasks", {
     method: "POST",
     body: JSON.stringify(body),
@@ -966,6 +1038,9 @@ $("#clear-default-proxy").addEventListener("click", () => {
 document.querySelectorAll("[data-close-modal]").forEach((el) => {
   el.addEventListener("click", closeModal);
 });
+document.querySelectorAll("[data-close-batch-task]").forEach((el) => {
+  el.addEventListener("click", closeBatchTaskModal);
+});
 document.querySelectorAll("[data-close-settings]").forEach((el) => {
   el.addEventListener("click", closeSettingsModal);
 });
@@ -975,6 +1050,7 @@ document.querySelectorAll("[data-close-password]").forEach((el) => {
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   closeModal();
+  closeBatchTaskModal();
   closeSettingsModal();
   closePasswordModal();
 });

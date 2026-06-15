@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>OA 接入 SUB2API</title>
+  <title>OA 接入</title>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/styles.css">
 </head>
@@ -12,12 +12,13 @@
     <header class="topbar shellbar">
       <div class="title">
         <div class="eyebrow">OA Workspace</div>
-        <h1>OA 接入 SUB2API</h1>
-        <p>导入“邮箱-----接码地址”，取 AT 池里带手机号的账号，用手机号密码登录并绑定邮箱，再通过 SUB2API OAuth 导入中转站。</p>
+        <h1>OA 接入</h1>
+        <p>导入“邮箱-----接码地址”，取 AT 池里带手机号的账号，用手机号密码登录并绑定邮箱，再选择导入 CPA 或 SUB2API。</p>
       </div>
       <nav class="nav">
         <button class="nav-ai" type="button" data-agent-open>AI 接入</button>
         <a href="/">首页</a>
+        <a href="/accounts">账户台账</a>
         <a href="/register">手机号注册</a>
         <a href="/plus">AT 升级</a>
         <a class="active" href="/oa">OA 接入</a>
@@ -39,12 +40,16 @@
             <div class="label">邮箱</div>
             <div id="email-count" class="value">0</div>
           </div>
-          <div class="stat"><div class="label">AT+手机号</div><div id="phone-at-count" class="value">0</div></div>
+          <div id="at-pool-stat" class="stat stat-clickable" role="button" tabindex="0" title="点击查看号码池">
+            <div class="label">AT+手机号</div>
+            <div id="phone-at-count" class="value">0</div>
+          </div>
         </div>
         <div class="row toolbar">
           <button id="reload-emails" class="small" type="button">刷新邮箱</button>
           <button id="open-email-pool" class="small" type="button">查看邮箱池</button>
           <button id="reload-ats" class="small" type="button">刷新 AT</button>
+          <button id="open-at-pool" class="small" type="button">查看号码池</button>
         </div>
         <div id="oa-at-list" class="oa-at-list"></div>
         <div id="emails" class="email-list"></div>
@@ -58,7 +63,7 @@
         <div class="section-head">
           <div>
             <h2>OA 任务列表</h2>
-            <p class="muted">按任务形式展示手机号登录、邮箱绑定、OAuth 回调和 SUB2API 创建结果。</p>
+            <p class="muted">按任务形式展示手机号登录、邮箱绑定、OAuth 回调和导入结果。</p>
           </div>
           <button id="refresh-tasks" class="small" type="button">刷新</button>
         </div>
@@ -70,7 +75,7 @@
                 <th>任务</th>
                 <th>手机号</th>
                 <th>绑定邮箱</th>
-                <th>SUB2API</th>
+                <th>接入结果</th>
                 <th>操作</th>
               </tr>
             </thead>
@@ -80,9 +85,42 @@
       </section>
 
       <aside class="card panel-right">
-        <h2>创建 OA 接入任务</h2>
-        <p class="muted">按顺序取 AT 池里已经带手机号的 token，并预留同等数量的邮箱。</p>
+        <div class="section-head">
+          <div>
+            <h2>创建 OA 接入任务</h2>
+            <p class="muted">按顺序取 AT 池里已经带手机号的 token，并预留同等数量的邮箱。</p>
+          </div>
+          <button id="open-target-settings" class="ghost icon-btn settings-gear" type="button" title="配置接入设置" aria-label="配置接入设置">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19.4 13.5a7.8 7.8 0 0 0 0-3l2-1.5-2-3.5-2.4 1a8 8 0 0 0-2.6-1.5L14 2.5h-4l-.4 2.5A8 8 0 0 0 7 6.5l-2.4-1-2 3.5 2 1.5a7.8 7.8 0 0 0 0 3l-2 1.5 2 3.5 2.4-1a8 8 0 0 0 2.6 1.5l.4 2.5h4l.4-2.5a8 8 0 0 0 2.6-1.5l2.4 1 2-3.5-2-1.5ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/>
+            </svg>
+          </button>
+        </div>
         <form id="task-form">
+          <div class="field">
+            <label for="oaTarget">接入目标</label>
+            <select id="oaTarget" name="target">
+              <option value="sub2api" selected>SUB2API</option>
+              <option value="cpa">CPA 兼容模式</option>
+            </select>
+            <div class="hint">SUB2API 会创建中转站账号；CPA 会走 codex-auth-url / oauth-callback 入库。</div>
+          </div>
+          <div class="field">
+            <label>使用号码</label>
+            <div id="selected-at-summary" class="hint">未指定，按 AT 池顺序自动取带手机号的账号。</div>
+            <div class="row toolbar">
+              <button id="open-at-picker" class="small" type="button">从号码池选择</button>
+              <button id="clear-selected-ats" class="ghost small hidden" type="button">清空选择</button>
+            </div>
+          </div>
+          <div class="field">
+            <label>使用邮箱</label>
+            <div id="selected-email-summary" class="hint">未指定，按邮箱池顺序自动分配。</div>
+            <div class="row toolbar">
+              <button id="open-email-picker" class="small" type="button">从邮箱池选择</button>
+              <button id="clear-selected-emails" class="ghost small hidden" type="button">清空选择</button>
+            </div>
+          </div>
           <div class="split">
             <div class="field">
               <label for="count">数量</label>
@@ -119,8 +157,21 @@
           </label>
           <button class="primary wide" type="submit">创建 OA 接入任务</button>
         </form>
+      </aside>
+    </section>
 
-        <div class="config-strip">
+    <div id="target-settings-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-target-settings></div>
+      <div class="modal-panel modal-narrow">
+        <div class="modal-head">
+          <div>
+            <h2 id="target-settings-title">接入设置</h2>
+            <p id="target-settings-subtitle" class="muted"></p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-target-settings>×</button>
+        </div>
+        <div class="modal-body">
+        <div id="sub2api-panel" class="config-strip target-config-panel">
           <h3>SUB2API 配置</h3>
           <p class="muted">保存地址、账号、密码和导入分组后，新任务会使用这组配置。</p>
           <form id="sub2api-form">
@@ -158,8 +209,30 @@
           </form>
           <pre id="sub2api-config"></pre>
         </div>
-      </aside>
-    </section>
+
+        <div id="cpa-panel" class="config-strip target-config-panel hidden">
+          <h3>CPA 配置</h3>
+          <p class="muted">CPA 兼容模式会获取 codex-auth-url，完成 OpenAI OAuth 后把 callback 提交给 CPA 入库。</p>
+          <form id="cpa-form">
+            <div class="field">
+              <label for="cpaBaseUrl">地址</label>
+              <input id="cpaBaseUrl" name="baseUrl" placeholder="https://your-cpa.example">
+            </div>
+            <div class="field">
+              <label for="cpaManagementKey">Management Key</label>
+              <input id="cpaManagementKey" name="managementKey" type="password" autocomplete="new-password">
+            </div>
+            <label class="check-row">
+              <input id="cpaAutoUploadAuth" name="autoUploadAuth" type="checkbox">
+              <span>注册流程自动上传 auth.json 到 CPA</span>
+            </label>
+            <button class="wide" type="submit">保存 CPA 配置</button>
+          </form>
+          <pre id="cpa-config"></pre>
+        </div>
+        </div>
+      </div>
+    </div>
 
     <div id="import-modal" class="modal hidden" role="dialog" aria-modal="true">
       <div class="modal-backdrop" data-close-import></div>
@@ -205,6 +278,20 @@
           <button class="ghost icon-btn" type="button" data-close-email-list>×</button>
         </div>
         <div id="email-pool-list" class="modal-body email-pool-modal-list"></div>
+      </div>
+    </div>
+
+    <div id="at-list-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-at-list></div>
+      <div class="modal-panel">
+        <div class="modal-head">
+          <div>
+            <h2>号码池</h2>
+            <p id="at-list-modal-subtitle" class="muted"></p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-at-list>×</button>
+        </div>
+        <div id="at-pool-list" class="modal-body at-pool-modal-list"></div>
       </div>
     </div>
 

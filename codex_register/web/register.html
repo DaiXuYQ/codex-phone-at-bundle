@@ -17,7 +17,8 @@
       </div>
       <nav class="nav">
         <button class="nav-ai" type="button" data-agent-open>AI 接入</button>
-        <a href="/">首页</a>
+        <a href="/">首页</a>
+        <a href="/accounts">账户台账</a>
         <a class="active" href="/register">手机号注册</a>
         <a href="/plus">AT 升级</a>
         <a href="/oa">OA 接入</a>
@@ -49,7 +50,14 @@
           </div>
           <div class="field">
             <label for="tokenOut">AT 输出文件</label>
-            <input id="tokenOut" name="tokenOut" placeholder="默认读取 ppxy-env.cmd 的 TOKEN_FILE">
+            <input id="tokenOut" name="tokenOut" placeholder="默认读取 ppxy-env.cmd 的 TOKEN_FILE">
+            <div class="free-flow-box">
+              <label class="check-row">
+                <input id="freeFlowMode" name="freeFlowMode" type="checkbox">
+                <span>完全 free 流程：注册成功后直接 OA/SUB2API</span>
+              </label>
+              <div class="hint">开启后会跳过 AT 升级 Plus；成功注册后继续绑定邮箱并导入 SUB2API，账户台账状态记为 free。</div>
+            </div>
           </div>
           <div class="field">
             <label for="register-password-preview">账号默认密码</label>
@@ -125,21 +133,23 @@
               <span>接码成本</span>
               <strong id="sms-cost-total">$0.0000</strong>
             </div>
-            <div id="sms-balance-bar" class="summary-balance-list" aria-live="polite"></div>
-            <div class="summary-filter-inline">
-              <div id="task-status-filter" class="task-filter" role="tablist" aria-label="任务状态筛选">
-                <button class="active" type="button" data-task-filter="all">全部 <b>0</b></button>
-                <button type="button" data-task-filter="running">运行中 <b>0</b></button>
-                <button type="button" data-task-filter="failed">失败 <b>0</b></button>
-                <button type="button" data-task-filter="success">成功 <b>0</b></button>
-              </div>
-            </div>
-          </div>
-          <div class="row success-actions">
-            <button id="copy-success-path" class="small" type="button" disabled>复制路径</button>
-            <button id="export-success" class="primary small" type="button" disabled>导出成功 txt</button>
-          </div>
-        </div>
+            <div id="sms-balance-bar" class="summary-balance-list" aria-live="polite"></div>
+          </div>
+          <div class="summary-bottom-row">
+            <div class="summary-filter-inline">
+              <div id="task-status-filter" class="task-filter" role="tablist" aria-label="任务状态筛选">
+                <button class="active" type="button" data-task-filter="all">全部 <b>0</b></button>
+                <button type="button" data-task-filter="running">运行中 <b>0</b></button>
+                <button type="button" data-task-filter="failed">失败 <b>0</b></button>
+                <button type="button" data-task-filter="success">成功 <b>0</b></button>
+              </div>
+            </div>
+            <div class="row success-actions">
+              <button id="copy-success-path" class="small" type="button" disabled>复制路径</button>
+              <button id="export-success" class="primary small" type="button" disabled>导出成功 txt</button>
+            </div>
+          </div>
+        </div>
         <div class="register-view-tabs" role="tablist" aria-label="register task views">
           <button class="active" type="button" data-register-view="tasks">&#21407;&#20219;&#21153;&#21015;&#34920;</button>
           <button type="button" data-register-view="batches">&#25209;&#27425; / Agent &#35270;&#22270;</button>
@@ -198,7 +208,67 @@
       </div>
     </div>
 
-    <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true">
+    <div id="batch-task-modal" class="modal hidden" role="dialog" aria-modal="true">
+
+      <div class="modal-backdrop" data-close-batch-task></div>
+
+      <div class="modal-panel batch-task-modal-panel">
+
+        <div class="modal-head">
+
+          <div>
+
+            <h2 id="batch-task-modal-title">批次任务</h2>
+
+            <p id="batch-task-modal-subtitle" class="muted"></p>
+
+          </div>
+
+          <button class="ghost icon-btn" type="button" data-close-batch-task>×</button>
+
+        </div>
+
+        <div class="batch-task-modal-body">
+
+          <div class="table-wrap clean batch-task-table-wrap">
+
+            <table>
+
+              <thead>
+
+                <tr>
+
+                  <th>状态</th>
+
+                  <th>任务信息</th>
+
+                  <th>手机号</th>
+
+                  <th>AT</th>
+
+                  <th>时间</th>
+
+                  <th>操作</th>
+
+                </tr>
+
+              </thead>
+
+              <tbody id="batch-task-modal-list"></tbody>
+
+            </table>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+
+
+    <div id="password-modal" class="modal hidden" role="dialog" aria-modal="true">
       <div class="modal-backdrop" data-close-password></div>
       <div class="modal-panel modal-narrow password-modal-panel">
         <div class="modal-head">
