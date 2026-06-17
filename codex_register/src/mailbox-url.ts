@@ -12,6 +12,7 @@ export interface MailboxWaitOptions {
     baseline?: MailboxSnapshot | null;
     timeoutMs?: number;
     intervalMs?: number;
+    allowBaselineCodeAfterMs?: number;
 }
 
 function asString(value: unknown): string {
@@ -253,14 +254,24 @@ export class MailboxUrlCodeProvider {
     async waitForCode(options: MailboxWaitOptions = {}): Promise<string> {
         const timeoutMs = Math.max(5000, Math.floor(options.timeoutMs ?? 120000));
         const intervalMs = Math.max(1000, Math.floor(options.intervalMs ?? 3000));
+        const allowBaselineCodeAfterMs = Math.max(0, Math.floor(options.allowBaselineCodeAfterMs ?? 0));
         const startedAt = Date.now();
         let lastError = "";
 
         while (Date.now() - startedAt < timeoutMs) {
             try {
                 const snapshot = await this.snapshot();
-                if (snapshot.code && !sameAsBaseline(snapshot, options.baseline)) {
-                    return snapshot.code;
+                if (snapshot.code) {
+                    const isBaseline = sameAsBaseline(snapshot, options.baseline);
+                    if (!isBaseline) {
+                        return snapshot.code;
+                    }
+                    if (allowBaselineCodeAfterMs && Date.now() - startedAt >= allowBaselineCodeAfterMs) {
+                        console.warn(
+                            `[mailbox-url] still only sees baseline code after ${allowBaselineCodeAfterMs}ms; trying it as fallback`,
+                        );
+                        return snapshot.code;
+                    }
                 }
                 lastError = snapshot.code ? "mailbox still returns baseline code" : "mailbox returned no code";
             } catch (error) {

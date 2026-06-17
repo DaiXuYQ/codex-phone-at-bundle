@@ -107,6 +107,10 @@ async function appendTokenOut(filePath: string, token: string): Promise<void> {
     console.log(`[oa-sub2api] 已追加 access_token 到 ${filePath}`);
 }
 
+function buildSub2ApiAccountName(phone: string, email: string): string {
+    return `${phone}---${email}`;
+}
+
 async function main(): Promise<void> {
     const phone = normalizePhone(readArgValue("--phone"));
     if (!phone) throw new Error("缺少 --phone");
@@ -139,11 +143,11 @@ async function main(): Promise<void> {
     else console.log("[oa-sub2api] mailbox=hotmail_refresh_token");
 
     let baseline: MailboxSnapshot | null = null;
+    const mailboxProvider = entry.mailboxUrl ? new MailboxUrlCodeProvider(entry.mailboxUrl) : null;
     let hotmailProvider: {getEmailVerificationCode(email: string, options?: {minTimestampMs?: number}): Promise<string>} | null = null;
-    if (entry.mailboxUrl) {
-        const mailbox = new MailboxUrlCodeProvider(entry.mailboxUrl);
+    if (mailboxProvider) {
         try {
-            baseline = await mailbox.snapshot();
+            baseline = await mailboxProvider.snapshot();
             console.log(`[oa-sub2api] mailbox baseline code=${baseline.code ? "yes" : "no"}`);
         } catch (error) {
             console.warn(`[oa-sub2api] mailbox baseline 失败，继续等待新码: ${error instanceof Error ? error.message : String(error)}`);
@@ -154,54 +158,125 @@ async function main(): Promise<void> {
         hotmailProvider = createHotmailProvider();
     }
 
-    const sub2api = new Sub2ApiClient(buildSub2ApiSettings());
-    console.log("[oa-sub2api] [1] SUB2API 生成 OpenAI OAuth URL");
-    const prepared = await sub2api.prepareOpenAiOAuth();
-    console.log(`[oa-sub2api]     group=${prepared.groupLabel}`);
-    console.log(`[oa-sub2api]     oauth=${prepared.oauthUrl.slice(0, 140)}...`);
+    const refreshMailboxBaseline = async (label: string) => {
+        if (!mailboxProvider) return;
+        try {
+            baseline = await mailboxProvider.snapshot();
+            console.log(`[oa-sub2api] mailbox ${label} baseline code=${baseline.code ? "yes" : "no"}`);
+        } catch (error) {
+            console.warn(`[oa-sub2api] mailbox ${label} baseline 失败，继续等待新码: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    };
 
-    const fetchAddEmailOtp = async () => {
-        console.log(`[oa-sub2api] 等待绑定邮箱验证码: ${entry.email}`);
+    const fetchEntryEmailOtp = async (label: string) => {
+        console.log(`[oa-sub2api] 等待${label}验证码: ${entry.email}`);
         const code = hotmailProvider
             ? await hotmailProvider.getEmailVerificationCode(entry.email, {minTimestampMs: Date.now() - 5000})
-            : await new MailboxUrlCodeProvider(entry.mailboxUrl).waitForCode({
+            : await mailboxProvider!.waitForCode({
                 baseline,
                 timeoutMs: 120000,
                 intervalMs: 3000,
+                allowBaselineCodeAfterMs: 45000,
             });
-        console.log(`[oa-sub2api] 收到邮箱验证码: ${code}`);
+        console.log(`[oa-sub2api] 收到${label}验证码: ${code}`);
+        if (mailboxProvider) {
+            await refreshMailboxBaseline(`${label}后`);
+        }
         return code;
     };
 
-    const client = new OpenAIClient({
-        email: phone,
-        password,
-        deviceProfile: generateRandomDeviceProfile(),
-        manualMode: hasFlag("--otp"),
-        bindEmail: entry.email,
-        fetchAddEmailOtp,
-    });
+    const sub2api = new Sub2ApiClient(buildSub2ApiSettings());
+    console.log("[oa-sub2api] [1] SUB2API 生成 OpenAI OAuth URL");
+    let prepared = await sub2api.prepareOpenAiOAuth();
+    console.log(`[oa-sub2api]     group=${prepared.groupLabel}`);
+    console.log(`[oa-sub2api]     oauth=${prepared.oauthUrl.slice(0, 140)}...`);
 
-    console.log("[oa-sub2api] [2] 手机号密码登录并绑定邮箱");
+    const manualMode = hasFlag("--otp");
+    const singleOAuth = hasFlag("--single-oauth");
+    const allowSkipBindEmail = hasFlag("--allow-skip-bind-email");
+    const requireChatgptAccountId = !hasFlag("--allow-missing-chatgpt-account-id");
     let callbackUrl = "";
-    try {
-        callbackUrl = await client.authLoginViaCpaAuthorizeURL(prepared.oauthUrl, "SUB2API");
-    } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (/email_already_in_use/i.test(message)) {
-            if (consumeFromPool || consumeOnError) {
-                await consumeEmailPoolEntry(emailPoolPath, entry, "email_already_in_use");
+
+    const runPhoneBindStage = async () => {
+        const client = new OpenAIClient({
+            email: phone,
+            password,
+            deviceProfile: generateRandomDeviceProfile(),
+            manualMode,
+            bindEmail: entry.email,
+            fetchEmailOtp: () => fetchEntryEmailOtp("手机号登录邮箱"),
+            fetchAddEmailOtp: () => fetchEntryEmailOtp("绑定邮箱"),
+        });
+
+        console.log("[oa-sub2api] [2] 手机号密码登录并绑定邮箱");
+        try {
+            const bindCallbackUrl = await client.authLoginViaCpaAuthorizeURL(prepared.oauthUrl, "SUB2API");
+            console.log(`[oa-sub2api]     bind_callback=${bindCallbackUrl.slice(0, 140)}...`);
+            if (client.lastAddEmailVerified) {
+                console.log(`[oa-sub2api] 邮箱绑定已验证: ${client.lastAddEmailVerified}`);
+            } else if (client.lastEmailOtpVerified) {
+                console.log(`[oa-sub2api] 手机号登录已通过所选邮箱验证: ${client.lastEmailOtpVerified}`);
             } else {
-                await recordEmailPoolHistory(emailPoolPath, entry, "email_already_in_use");
+                console.log(
+                    `[oa-sub2api] 手机号 OAuth 未触发 add-email，已拿到 callback；` +
+                    `按“手机号已绑定邮箱”处理，继续用所选邮箱二次 OA: ${entry.email}`,
+                );
             }
-            console.warn("[oa-sub2api] 邮箱已被占用，已从邮箱池移除");
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (/email_already_in_use/i.test(message)) {
+                if (consumeFromPool || consumeOnError) {
+                    await consumeEmailPoolEntry(emailPoolPath, entry, "email_already_in_use");
+                } else {
+                    await recordEmailPoolHistory(emailPoolPath, entry, "email_already_in_use");
+                }
+                console.warn("[oa-sub2api] 邮箱已被占用，已从邮箱池移除");
+            }
+            throw error;
         }
-        throw error;
+    };
+
+    if (singleOAuth) {
+        const client = new OpenAIClient({
+            email: phone,
+            password,
+            deviceProfile: generateRandomDeviceProfile(),
+            manualMode,
+            bindEmail: entry.email,
+            fetchEmailOtp: () => fetchEntryEmailOtp("手机号登录邮箱"),
+            fetchAddEmailOtp: () => fetchEntryEmailOtp("绑定邮箱"),
+        });
+        console.log("[oa-sub2api] [2] 单次 OAuth：手机号密码登录并绑定邮箱");
+        callbackUrl = await client.authLoginViaCpaAuthorizeURL(prepared.oauthUrl, "SUB2API");
+    } else {
+        await runPhoneBindStage();
+
+        await refreshMailboxBaseline("邮箱登录前");
+        console.log("[oa-sub2api] [3] 重新生成 SUB2API OAuth URL，并使用邮箱登录");
+        prepared = await sub2api.prepareOpenAiOAuth();
+        console.log(`[oa-sub2api]     group=${prepared.groupLabel}`);
+        console.log(`[oa-sub2api]     oauth=${prepared.oauthUrl.slice(0, 140)}...`);
+
+        const emailClient = new OpenAIClient({
+            email: entry.email,
+            password,
+            deviceProfile: generateRandomDeviceProfile(),
+            manualMode,
+            fetchEmailOtp: () => fetchEntryEmailOtp("邮箱登录"),
+        });
+        callbackUrl = await emailClient.authLoginViaCpaAuthorizeURL(prepared.oauthUrl, "SUB2API");
     }
     console.log(`[oa-sub2api]     callback=${callbackUrl.slice(0, 140)}...`);
 
-    console.log("[oa-sub2api] [3] SUB2API exchange-code 并创建中转站账号");
-    const created = await sub2api.exchangeCallbackAndCreateAccount(prepared, callbackUrl, entry.email);
+    console.log("[oa-sub2api] [4] SUB2API exchange-code 并创建中转站账号");
+    const accountName = buildSub2ApiAccountName(phone, entry.email);
+    const created = await sub2api.exchangeCallbackAndCreateAccount(
+        prepared,
+        callbackUrl,
+        entry.email,
+        accountName,
+        {requireChatgptAccountId},
+    );
     console.log(`[oa-sub2api] [✅] SUB2API 已创建账号: ${created.accountName}`);
     console.log(`[oa-sub2api]     result=${JSON.stringify(created.account).slice(0, 500)}`);
 

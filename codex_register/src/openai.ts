@@ -236,6 +236,7 @@ export interface OpenAIClientOptions {
      * 用这个 email 提交 add-email/send，并通过 fetchAddEmailOtp 接 OTP。
      */
     bindEmail?: string;
+    fetchEmailOtp?: () => Promise<string>;
     fetchAddEmailOtp?: () => Promise<string>;
 }
 
@@ -254,11 +255,15 @@ export class OpenAIClient {
     deviceID = "";
     readonly smsBroker?: ISMSActivationBroker;
     readonly bindEmail: string;
+    readonly fetchEmailOtp?: () => Promise<string>;
     readonly fetchAddEmailOtp?: () => Promise<string>;
+    lastAddEmailVerified = "";
+    lastEmailOtpVerified = "";
 
     constructor(options: OpenAIClientOptions) {
         this.smsBroker = options.smsBroker;
         this.bindEmail = options.bindEmail?.trim() ?? "";
+        this.fetchEmailOtp = options.fetchEmailOtp;
         this.fetchAddEmailOtp = options.fetchAddEmailOtp;
         this.email = options.email?.trim() ?? "";
         this.password = options.password;
@@ -345,6 +350,7 @@ export class OpenAIClient {
         if (continueURL === `${AUTH_BASE_URL}/email-verification`) {
             this.logProgress(4, totalSteps, "提交邮箱验证码");
             continueURL = await this.emailOtpValidate();
+            this.lastEmailOtpVerified = this.bindEmail || this.email;
         }
 
         if (continueURL === `${AUTH_BASE_URL}/add-phone`) {
@@ -370,6 +376,7 @@ export class OpenAIClient {
                 const code = await this.fetchAddEmailOtp();
                 if (!code) throw new Error("add-email OTP 未提供");
                 continueURL = await this.emailOtpValidate(code);
+                this.lastAddEmailVerified = this.bindEmail;
             }
             if (continueURL === `${AUTH_BASE_URL}/sign-in-with-chatgpt/codex/consent`) {
                 continueURL = await this.selectWorkspace(continueURL);
@@ -1354,6 +1361,9 @@ export class OpenAIClient {
         if (this.manualMode) {
             console.log(`manualEmailOtp: targetEmail=${this.email}`);
             return this.promptEmailOtp();
+        }
+        if (this.fetchEmailOtp) {
+            return this.fetchEmailOtp();
         }
         console.log(`autoEmailOtp: provider=${MAILBOX_CONFIG.provider} targetEmail=${this.email}`);
         return getEmailVerificationCode(this.email);

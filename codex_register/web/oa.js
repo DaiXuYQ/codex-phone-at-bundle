@@ -7,6 +7,10 @@ let selectedTaskId = "";
 let configCache = null;
 let selectedEmailSet = new Set();
 let selectedAtSet = new Set();
+let atBatchInputCache = "";
+let atBatchResult = "";
+let emailBatchInputCache = "";
+let emailBatchResult = "";
 
 function toast(message) {
   const el = $("#toast");
@@ -59,6 +63,20 @@ function maskSecret(value, head = 8, tail = 8) {
   if (!text) return "";
   if (text.length <= head + tail + 3) return `${text.slice(0, 2)}***`;
   return `${text.slice(0, head)}...${text.slice(-tail)}`;
+}
+
+function uniqueList(items) {
+  return [...new Set(items.filter(Boolean))];
+}
+
+function parseBulkPhones(value) {
+  const candidates = String(value || "").match(/\+?\d[\d ().-]{6,}\d/g) || [];
+  return uniqueList(candidates.map(normalizePhoneInput));
+}
+
+function parseBulkEmails(value) {
+  const candidates = String(value || "").match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+  return uniqueList(candidates.map((item) => item.toLowerCase()));
 }
 
 function shortHash(hash) {
@@ -377,7 +395,7 @@ function emailPoolTableRow(item) {
   const checked = selectedEmailSet.has(item.email.toLowerCase()) ? "checked" : "";
   const disabled = item.available ? "" : "disabled";
   return `
-    <tr class="selectable" data-email-index="${item.index}">
+    <tr class="selectable ${checked ? "selected" : ""}" data-email-index="${item.index}">
       <td>
         <input class="email-pick-check" type="checkbox" data-pick-email="${encodedEmail}" ${checked} ${disabled} title="${item.available ? "选择这个邮箱" : "该邮箱当前不可用"}">
         <span class="email-index">${item.index + 1}</span>
@@ -416,6 +434,17 @@ function renderEmailPoolModal() {
           <button class="small" type="button" data-pick-all-emails>全选可用</button>
           <button class="ghost small" type="button" data-clear-picked-emails>清空</button>
           <button class="primary small" type="button" data-confirm-picked-emails>确认选择</button>
+        </div>
+      </div>
+      <div class="bulk-picker">
+        <label for="email-bulk-input">批量搜索邮箱</label>
+        <textarea id="email-bulk-input" class="bulk-picker-input" placeholder="每行一个邮箱，或直接粘贴带邮箱的文本">${escapeHtml(emailBatchInputCache)}</textarea>
+        <div class="row spread">
+          <span id="email-bulk-result" class="muted">${escapeHtml(emailBatchResult || "粘贴邮箱后点“匹配并勾选”。")}</span>
+          <div class="row">
+            <button class="small" type="button" data-bulk-pick-emails>匹配并勾选</button>
+            <button class="ghost small" type="button" data-clear-email-bulk-input>清空输入</button>
+          </div>
         </div>
       </div>
       <div class="table-wrap email-pool-table-wrap">
@@ -477,6 +506,33 @@ function promptBoundPhone(item) {
   return phone;
 }
 
+function bulkPickEmailsFromInput() {
+  const input = $("#email-bulk-input");
+  emailBatchInputCache = input?.value || "";
+  const wanted = parseBulkEmails(emailBatchInputCache);
+  if (!wanted.length) {
+    emailBatchResult = "未识别到邮箱。";
+    renderEmailPoolModal();
+    return;
+  }
+
+  const availableByEmail = new Map(emails.filter((item) => item.available).map((item) => [item.email.toLowerCase(), item]));
+  const matched = [];
+  const missing = [];
+  for (const email of wanted) {
+    const item = availableByEmail.get(email);
+    if (item) {
+      selectedEmailSet.add(item.email.toLowerCase());
+      matched.push(item.email);
+    } else {
+      missing.push(email);
+    }
+  }
+  emailBatchResult = `识别 ${wanted.length} 个，匹配并勾选 ${matched.length} 个${missing.length ? `，未找到/不可用 ${missing.length} 个：${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " ..." : ""}` : ""}`;
+  renderSelectedEmailSummary();
+  renderEmailPoolModal();
+}
+
 function bindEmailStatusForm() {
   const form = document.querySelector("[data-email-status-form]");
   if (!form || form.dataset.boundStatusForm === "1") return;
@@ -520,6 +576,23 @@ function bindEmailActions(root = document) {
       renderSelectedEmailSummary();
       const count = $("#email-picker-selected-count");
       if (count) count.textContent = String(selectedEmailSet.size);
+      checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
+    });
+  });
+
+  root.querySelectorAll("[data-bulk-pick-emails]").forEach((btn) => {
+    if (btn.dataset.boundBulkPickEmails === "1") return;
+    btn.dataset.boundBulkPickEmails = "1";
+    btn.addEventListener("click", bulkPickEmailsFromInput);
+  });
+
+  root.querySelectorAll("[data-clear-email-bulk-input]").forEach((btn) => {
+    if (btn.dataset.boundClearEmailBulk === "1") return;
+    btn.dataset.boundClearEmailBulk = "1";
+    btn.addEventListener("click", () => {
+      emailBatchInputCache = "";
+      emailBatchResult = "";
+      renderEmailPoolModal();
     });
   });
 
@@ -713,6 +786,17 @@ function renderAtPoolModal() {
           <button class="primary small" type="button" data-confirm-picked-ats>确认选择</button>
         </div>
       </div>
+      <div class="bulk-picker">
+        <label for="at-bulk-input">批量搜索号码</label>
+        <textarea id="at-bulk-input" class="bulk-picker-input" placeholder="+573004789726&#10;+573234874194&#10;+573137916814">${escapeHtml(atBatchInputCache)}</textarea>
+        <div class="row spread">
+          <span id="at-bulk-result" class="muted">${escapeHtml(atBatchResult || "粘贴号码后点“匹配并勾选”。")}</span>
+          <div class="row">
+            <button class="small" type="button" data-bulk-pick-ats>匹配并勾选</button>
+            <button class="ghost small" type="button" data-clear-at-bulk-input>清空输入</button>
+          </div>
+        </div>
+      </div>
       <div class="table-wrap at-pool-table-wrap">
         <table class="at-pool-table">
           <thead>
@@ -755,6 +839,36 @@ function findAtByHash(hash) {
   return ats.find((entry) => entry.hash === hash);
 }
 
+function bulkPickAtsFromInput() {
+  const input = $("#at-bulk-input");
+  atBatchInputCache = input?.value || "";
+  const wanted = parseBulkPhones(atBatchInputCache);
+  if (!wanted.length) {
+    atBatchResult = "未识别到手机号。";
+    renderAtPoolModal();
+    return;
+  }
+
+  const usableByPhone = new Map();
+  ats.filter(atUsableForOa).forEach((item) => {
+    if (item.phone) usableByPhone.set(normalizePhoneInput(item.phone), item);
+  });
+  const matched = [];
+  const missing = [];
+  for (const phone of wanted) {
+    const item = usableByPhone.get(phone);
+    if (item) {
+      selectedAtSet.add(item.hash);
+      matched.push(item.phone || phone);
+    } else {
+      missing.push(phone);
+    }
+  }
+  atBatchResult = `识别 ${wanted.length} 个，匹配并勾选 ${matched.length} 个${missing.length ? `，未找到/不可用 ${missing.length} 个：${missing.slice(0, 5).join(", ")}${missing.length > 5 ? " ..." : ""}` : ""}`;
+  renderSelectedAtSummary();
+  renderAtPoolModal();
+}
+
 function bindAtPoolActions(root = document) {
   root.querySelectorAll("[data-pick-at]").forEach((checkbox) => {
     if (checkbox.dataset.boundPickAt === "1") return;
@@ -769,6 +883,22 @@ function bindAtPoolActions(root = document) {
       const count = $("#at-picker-selected-count");
       if (count) count.textContent = String(selectedAtSet.size);
       checkbox.closest("tr")?.classList.toggle("selected", checkbox.checked);
+    });
+  });
+
+  root.querySelectorAll("[data-bulk-pick-ats]").forEach((btn) => {
+    if (btn.dataset.boundBulkPickAts === "1") return;
+    btn.dataset.boundBulkPickAts = "1";
+    btn.addEventListener("click", bulkPickAtsFromInput);
+  });
+
+  root.querySelectorAll("[data-clear-at-bulk-input]").forEach((btn) => {
+    if (btn.dataset.boundClearAtBulk === "1") return;
+    btn.dataset.boundClearAtBulk = "1";
+    btn.addEventListener("click", () => {
+      atBatchInputCache = "";
+      atBatchResult = "";
+      renderAtPoolModal();
     });
   });
 

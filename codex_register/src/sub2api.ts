@@ -34,6 +34,10 @@ export interface Sub2ApiAccountCreateResult {
     accountName: string;
 }
 
+export interface Sub2ApiCreateAccountOptions {
+    requireChatgptAccountId?: boolean;
+}
+
 interface Sub2ApiLoginResult {
     origin: string;
     token: string;
@@ -228,6 +232,8 @@ export class Sub2ApiClient {
         prepared: Sub2ApiPreparedOAuth,
         callbackUrl: string,
         sourceEmail = "",
+        accountNameOverride = "",
+        options: Sub2ApiCreateAccountOptions = {},
     ): Promise<Sub2ApiAccountCreateResult> {
         const callback = parseCallback(callbackUrl);
         if (prepared.state && callback.state !== prepared.state) {
@@ -251,7 +257,14 @@ export class Sub2ApiClient {
         const resolvedEmail = normalizeString(exchangeData.email)
             || normalizeString(credentials.email)
             || sourceEmail;
-        const accountName = resolvedEmail || prepared.draftName;
+        const expectedEmail = normalizeString(sourceEmail);
+        if (expectedEmail && resolvedEmail && resolvedEmail.toLowerCase() !== expectedEmail.toLowerCase()) {
+            throw new Error(`SUB2API OAuth 返回邮箱与绑定邮箱不一致: expected=${expectedEmail} actual=${resolvedEmail}`);
+        }
+        if (options.requireChatgptAccountId && !normalizeString(credentials.chatgpt_account_id)) {
+            throw new Error(`SUB2API OAuth 返回缺少 chatgpt_account_id: email=${resolvedEmail || expectedEmail || "(unknown)"}`);
+        }
+        const accountName = normalizeString(accountNameOverride) || resolvedEmail || prepared.draftName;
         const createBody: Record<string, unknown> = {
             name: accountName,
             notes: "",
@@ -389,4 +402,3 @@ export class Sub2ApiClient {
         return `SUB2API ${pathname} 失败: HTTP ${status} ${JSON.stringify(payload).slice(0, 500)}`;
     }
 }
-

@@ -97,6 +97,11 @@ a:hover {
   padding-bottom: 16px;
 }
 
+.app:has(.oa-workbench) {
+  width: min(1720px, calc(100vw - 24px));
+  padding-top: 22px;
+}
+
 .topbar {
   display: flex;
   align-items: flex-start;
@@ -375,7 +380,105 @@ button.busy::before {
 }
 
 .oa-workbench {
-  grid-template-columns: minmax(310px, 360px) minmax(560px, 1fr) minmax(300px, 360px);
+  grid-template-columns: minmax(260px, .8fr) minmax(820px, 2.8fr) minmax(280px, .85fr);
+  gap: 16px;
+}
+
+.app:has(.oa-workbench) .card {
+  padding: 16px;
+}
+
+.oa-workbench .panel-main {
+  min-width: 0;
+}
+
+.oa-workbench .panel-main .table-wrap {
+  overflow-x: auto;
+}
+
+.oa-workbench .panel-main table {
+  min-width: 1040px;
+  table-layout: fixed;
+}
+
+.oa-workbench .panel-main th,
+.oa-workbench .panel-main td {
+  padding: 11px 10px;
+}
+
+.oa-workbench .panel-main th:nth-child(1),
+.oa-workbench .panel-main td:nth-child(1) {
+  width: 76px;
+}
+
+.oa-workbench .panel-main th:nth-child(2),
+.oa-workbench .panel-main td:nth-child(2) {
+  width: 210px;
+}
+
+.oa-workbench .panel-main th:nth-child(3),
+.oa-workbench .panel-main td:nth-child(3) {
+  width: 136px;
+}
+
+.oa-workbench .panel-main th:nth-child(4),
+.oa-workbench .panel-main td:nth-child(4) {
+  width: 230px;
+}
+
+.oa-workbench .panel-main th:nth-child(5),
+.oa-workbench .panel-main td:nth-child(5) {
+  width: 250px;
+}
+
+.oa-workbench .panel-main th:nth-child(6),
+.oa-workbench .panel-main td:nth-child(6) {
+  width: 70px;
+}
+
+.oa-workbench .panel-main .mono {
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.oa-workbench .panel-main td:nth-child(3) .mono {
+  white-space: nowrap;
+}
+
+.oa-workbench .panel-main .task-main {
+  line-height: 1.25;
+}
+
+.oa-workbench .panel-main .task-note {
+  display: -webkit-box;
+  overflow: hidden;
+  margin-top: 4px;
+  font-size: 11px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.oa-workbench .panel-main .token-pill {
+  max-width: 100%;
+  border-radius: 16px;
+  line-height: 1.35;
+  white-space: normal;
+  text-overflow: clip;
+}
+
+.oa-workbench .panel-main .actions {
+  display: grid;
+  justify-items: stretch;
+  gap: 5px;
+}
+
+.oa-workbench .panel-main .actions button {
+  min-height: 28px;
+  min-width: 0;
+  padding: 4px 8px;
+  font-size: 11px;
 }
 
 .register-layout {
@@ -1234,6 +1337,31 @@ pre,
   background: var(--surface-glass);
   padding: 10px;
   backdrop-filter: blur(12px);
+}
+
+.bulk-picker {
+  margin-bottom: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-3) 86%, transparent);
+  padding: 10px;
+}
+
+.bulk-picker label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.bulk-picker-input {
+  min-height: 88px;
+  margin-bottom: 8px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  resize: vertical;
 }
 
 .at-pick-check,
