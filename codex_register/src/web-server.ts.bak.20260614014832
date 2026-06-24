@@ -7,15 +7,12 @@ import path from "node:path";
 import {fileURLToPath} from "node:url";
 import {Agent, ProxyAgent, type Dispatcher} from "undici";
 import {DEFAULT_CLIENT_ID, DEFAULT_REDIRECT_URI, DEFAULT_USER_AGENT} from "./constants.js";
-import {createAccountLedger, type AccountRecord} from "./account-ledger.js";
 import {createHeroSmsProvider} from "./sms/heroSMS.js";
 import type {SmsProvider} from "./sms/provider.js";
 import {createSmsBowerProvider} from "./sms/smsbower.js";
 type TaskStatus = "queued" | "running" | "success" | "failed" | "canceled";
 type EditableSmsProvider = "hero-sms" | "smsbower";
 type TaskKind = "register" | "oa-sub2api";
-type RegisterTaskFlowMode = "phone-register" | "free" | "phone-plus-oa" | "oa-only";
-type OaTarget = "sub2api" | "cpa";
 type OaEmailBindStatus = "free" | "reserved" | "bound" | "failed" | "canceled" | "disabled";
 
 interface RegisterTask {
@@ -23,23 +20,6 @@ interface RegisterTask {
     kind: TaskKind;
     status: TaskStatus;
     title: string;
-    accountId?: string;
-    workflowRunId?: string;
-    workflowStep?: string;
-    batchId?: string;
-    flowMode?: RegisterTaskFlowMode;
-    flowLabel?: string;
-    workflowStatus?: WorkflowStatus;
-    workflowMode?: "phone-plus-oa" | "free";
-    relatedOaTaskId?: string;
-    relatedOaStatus?: TaskStatus;
-    relatedOaEmail?: string;
-    relatedOaTarget?: OaTarget;
-    relatedSub2ApiAccount?: string;
-    relatedCpaAccount?: string;
-    relatedOaError?: string;
-    autoTargetSuccess?: number;
-    autoMaxAttempts?: number;
     createdAt: string;
     updatedAt: string;
     startedAt?: string;
@@ -62,17 +42,13 @@ interface RegisterTask {
     mailboxUrl?: string;
     emailRaw?: string;
     oaProxyUrl?: string;
-    oaTarget?: OaTarget;
     sub2apiAccount?: string;
     sub2apiGroup?: string;
-    cpaAccount?: string;
     sourceAccessTokenHash?: string;
     accessTokenHash?: string;
     accessTokenPreview?: string;
     successTextFile?: string;
     error?: string;
-    errorType?: string;
-    errorSuggestion?: string;
     logs: string[];
 }
 
@@ -95,9 +71,7 @@ interface OaEmailPoolItem {
     bindStatus: OaEmailBindStatus;
     bindPhone?: string;
     bindTaskId?: string;
-    bindTarget?: OaTarget;
     bindSub2ApiAccount?: string;
-    bindCpaAccount?: string;
     bindAccessTokenHash?: string;
     bindError?: string;
     bindUpdatedAt?: string;
@@ -109,13 +83,9 @@ interface OaEmailStatusRecord {
     status: OaEmailBindStatus;
     phone?: string;
     taskId?: string;
-    target?: OaTarget;
     sub2apiAccount?: string;
-    cpaAccount?: string;
     accessTokenHash?: string;
     error?: string;
-    failureType?: string;
-    retryable?: boolean;
     note?: string;
     updatedAt: string;
 }
@@ -151,8 +121,6 @@ interface AtOaRecord {
 interface PlusJobRecord {
     localId: string;
     jobId: string;
-    accountId?: string;
-    workflowRunId?: string;
     status: string;
     clientRef: string;
     tokenHash?: string;
@@ -172,82 +140,6 @@ interface PlusJobRecord {
     createdAt: string;
     updatedAt: string;
     error?: string;
-}
-
-type WorkflowStatus = "queued" | "running" | "awaiting_plus_otp" | "success" | "failed" | "canceled";
-type WorkflowStep = "register" | "plus" | "oa" | "done";
-
-interface WorkflowRecord {
-    runId: string;
-    batchId?: string;
-    mode?: "phone-plus-oa" | "free";
-    status: WorkflowStatus;
-    step: WorkflowStep;
-    target: OaTarget;
-    freeMode?: boolean;
-    plusEnabled: boolean;
-    paypalPhone?: string;
-    accountId?: string;
-    registerTaskId?: string;
-    plusJobLocalId?: string;
-    oaTaskId?: string;
-    tokenHash?: string;
-    phone?: string;
-    bindEmail?: string;
-    bindMailboxUrl?: string;
-    bindEmailRaw?: string;
-    sub2apiAccount?: string;
-    cpaAccount?: string;
-    error?: string;
-    createdAt: string;
-    updatedAt: string;
-    finishedAt?: string;
-    options: {
-        registerConcurrency: number;
-        oaConcurrency: number;
-        removeTokenOnPlusSuccess: boolean;
-        removeTokenOnOaSuccess: boolean;
-        tokenOut?: string;
-        password?: string;
-        oaProxyUrl?: string;
-        sub2apiGroup?: string;
-        sentinelBrowserProxy?: string;
-        sentinelBrowserPath?: string;
-        mode?: string;
-    };
-    logs: string[];
-}
-
-type FreeAutoBatchStatus = "running" | "success" | "failed" | "canceled";
-
-interface FreeAutoBatchRecord {
-    batchId: string;
-    status: FreeAutoBatchStatus;
-    targetSuccess: number;
-    maxAttempts: number;
-    initialCount: number;
-    registerConcurrency: number;
-    oaConcurrency: number;
-    createdAttempts: number;
-    successCount: number;
-    activeCount: number;
-    failedCount: number;
-    canceledCount: number;
-    createdAt: string;
-    updatedAt: string;
-    finishedAt?: string;
-    error?: string;
-    options: {
-        target: OaTarget;
-        tokenOut?: string;
-        password?: string;
-        oaProxyUrl?: string;
-        sub2apiGroup?: string;
-        sentinelBrowserProxy?: string;
-        sentinelBrowserPath?: string;
-        removeTokenOnOaSuccess: boolean;
-    };
-    logs: string[];
 }
 
 interface PpxyConfig {
@@ -278,29 +170,19 @@ const dataDir = path.join(rootDir, ".web-data");
 const logDir = path.join(dataDir, "logs");
 const tasksFile = path.join(dataDir, "register-tasks.json");
 const plusJobsFile = path.join(dataDir, "plus-jobs.json");
-const workflowsFile = path.join(dataDir, "workflows.json");
-const freeAutoBatchesFile = path.join(dataDir, "free-auto-batches.json");
 const atMetaFile = path.join(dataDir, "at-meta.json");
 const oaEmailPoolFile = path.join(dataDir, "oa-email-pool.txt");
 const oaEmailStatusFile = path.join(dataDir, "oa-email-status.json");
 const agentQuickDocFile = path.join(rootDir, "AGENT-QUICK-UNDERSTANDING.md");
 const agentFullDocFile = path.join(rootDir, "AGENT-INTEGRATION.md");
 
-const accountLedger = createAccountLedger(dataDir);
 const registerTasks = new Map<string, RuntimeRegisterTask>();
 const plusJobs = new Map<string, PlusJobRecord>();
-const workflows = new Map<string, WorkflowRecord>();
-const freeAutoBatches = new Map<string, FreeAutoBatchRecord>();
 const pollingPlusJobs = new Set<string>();
-const runningWorkflows = new Set<string>();
 const smsCancelInFlight = new Set<string>();
 let registerQueue: RuntimeRegisterTask[] = [];
-let freeAutoReplenishQueue: Promise<void> = Promise.resolve();
-const taskMaxConcurrency: Record<TaskKind, number> = {
-    register: 1,
-    "oa-sub2api": 1,
-};
-let oaTaskCreateQueue: Promise<void> = Promise.resolve();
+let registerRunning = 0;
+let registerMaxConcurrency = 1;
 let atMeta: AtMetaStore = {trial: {}, oa: {}};
 let oaEmailStatus: OaEmailStatusStore = {emails: {}};
 const fileWriteQueues = new Map<string, Promise<void>>();
@@ -324,12 +206,8 @@ function tokenPreview(token: string): string {
     return `${token.slice(0, 12)}...${token.slice(-8)}`;
 }
 
-function makeBatchId(prefix = "reg_batch"): string {
-    return `${prefix}_${Date.now()}_${randomUUID().slice(0, 8)}`;
-}
-
 function redactCliArgs(args: string[]): string[] {
-    const secretFlags = new Set(["--password", "--sub2api-password", "--cpa-key", "--mailbox-url", "--email-raw"]);
+    const secretFlags = new Set(["--password", "--sub2api-password", "--mailbox-url", "--email-raw"]);
     const redacted: string[] = [];
     for (let i = 0; i < args.length; i += 1) {
         const arg = args[i];
@@ -346,15 +224,6 @@ function safeNumber(value: unknown, fallback: number, min: number, max: number):
     const parsed = Number(value);
     if (!Number.isFinite(parsed)) return fallback;
     return Math.max(min, Math.min(max, Math.floor(parsed)));
-}
-
-function normalizeTaskFlowMode(value: unknown, fallback: RegisterTaskFlowMode): RegisterTaskFlowMode {
-    const normalized = String(value ?? "").trim().toLowerCase();
-    if (normalized === "free" || normalized === "free-auto" || normalized === "full-free") return "free";
-    if (normalized === "phone-plus-oa" || normalized === "plus") return "phone-plus-oa";
-    if (normalized === "oa-only" || normalized === "oa") return "oa-only";
-    if (normalized === "phone-register" || normalized === "register" || normalized === "phone") return "phone-register";
-    return fallback;
 }
 
 async function delay(ms: number): Promise<void> {
@@ -393,7 +262,6 @@ async function writeJsonFile(filePath: string, value: unknown): Promise<void> {
 
 async function loadStores(): Promise<void> {
     await ensureDataDirs();
-    await accountLedger.load();
     oaEmailStatus = await readJsonFile<OaEmailStatusStore>(oaEmailStatusFile, {emails: {}});
     if (!oaEmailStatus || typeof oaEmailStatus !== "object" || !oaEmailStatus.emails) {
         oaEmailStatus = {emails: {}};
@@ -440,48 +308,6 @@ async function loadStores(): Promise<void> {
         }
     }
 
-    const loadedWorkflows = await readJsonFile<WorkflowRecord[]>(workflowsFile, []);
-    for (const workflow of loadedWorkflows) {
-        if (workflow.status === "queued" || workflow.status === "running") {
-            workflow.status = "queued";
-            workflow.error = "server restarted before workflow finished; resume required";
-            workflow.updatedAt = nowIso();
-            workflow.logs = [...(workflow.logs ?? []), `[${new Date().toLocaleString()}] paused after server restart; click resume to continue`];
-        }
-        workflows.set(workflow.runId, {
-            ...workflow,
-            mode: workflow.mode ?? (workflow.freeMode ? "free" : "phone-plus-oa"),
-            logs: workflow.logs ?? [],
-        });
-    }
-
-    const loadedFreeAutoBatches = await readJsonFile<FreeAutoBatchRecord[]>(freeAutoBatchesFile, []);
-    for (const batch of loadedFreeAutoBatches) {
-        const normalized: FreeAutoBatchRecord = {
-            ...batch,
-            status: batch.status === "running" ? "running" : batch.status,
-            registerConcurrency: safeNumber(batch.registerConcurrency, 1, 1, 10),
-            oaConcurrency: safeNumber(batch.oaConcurrency, 1, 1, 10),
-            createdAttempts: batch.createdAttempts ?? 0,
-            successCount: batch.successCount ?? 0,
-            activeCount: batch.activeCount ?? 0,
-            failedCount: batch.failedCount ?? 0,
-            canceledCount: batch.canceledCount ?? 0,
-            options: {
-                target: normalizeOaTarget(batch.options?.target, "sub2api"),
-                tokenOut: batch.options?.tokenOut,
-                password: batch.options?.password,
-                oaProxyUrl: batch.options?.oaProxyUrl,
-                sub2apiGroup: batch.options?.sub2apiGroup,
-                sentinelBrowserProxy: batch.options?.sentinelBrowserProxy,
-                sentinelBrowserPath: batch.options?.sentinelBrowserPath,
-                removeTokenOnOaSuccess: batch.options?.removeTokenOnOaSuccess === true,
-            },
-            logs: batch.logs ?? [],
-        };
-        freeAutoBatches.set(normalized.batchId, normalized);
-    }
-
     atMeta = await readJsonFile<AtMetaStore>(atMetaFile, {trial: {}, oa: {}});
     if (!atMeta || typeof atMeta !== "object") {
         atMeta = {trial: {}, oa: {}};
@@ -504,14 +330,6 @@ async function saveRegisterTasks(): Promise<void> {
 
 async function savePlusJobs(): Promise<void> {
     await writeJsonFile(plusJobsFile, Array.from(plusJobs.values()));
-}
-
-async function saveWorkflows(): Promise<void> {
-    await writeJsonFile(workflowsFile, Array.from(workflows.values()));
-}
-
-async function saveFreeAutoBatches(): Promise<void> {
-    await writeJsonFile(freeAutoBatchesFile, Array.from(freeAutoBatches.values()));
 }
 
 async function saveAtMeta(): Promise<void> {
@@ -538,53 +356,6 @@ function savePlusJobsLater(): void {
     void savePlusJobs().catch((error) => {
         console.error(`save plus jobs failed: ${error instanceof Error ? error.message : String(error)}`);
     });
-}
-
-function saveWorkflowsLater(): void {
-    void saveWorkflows().catch((error) => {
-        console.error(`save workflows failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-}
-
-function saveFreeAutoBatchesLater(): void {
-    void saveFreeAutoBatches().catch((error) => {
-        console.error(`save free auto batches failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-}
-
-async function syncTaskToAccountLedger(task: RuntimeRegisterTask, eventType?: string): Promise<AccountRecord | null> {
-    const account = await accountLedger.upsertFromTask(task, {eventType});
-    if (account && task.accountId !== account.id) {
-        task.accountId = account.id;
-        saveRegisterTasksLater();
-    }
-    return account;
-}
-
-async function syncPlusJobToAccountLedger(job: PlusJobRecord, eventType?: string): Promise<AccountRecord | null> {
-    const account = await accountLedger.upsertFromPlusJob(job, {eventType});
-    if (account && job.accountId !== account.id) {
-        job.accountId = account.id;
-        savePlusJobsLater();
-    }
-    return account;
-}
-
-async function syncTokenToAccountLedger(token: string, tokenFile: string, issuedAt?: string): Promise<AccountRecord | null> {
-    const info = tokenInfo(token, 0);
-    return accountLedger.upsertFromToken({
-        hash: String(info.hash ?? tokenHash(token)),
-        preview: String(info.preview ?? tokenPreview(token)),
-        tokenFile,
-        email: String(info.email ?? ""),
-        phone: String(info.phone ?? ""),
-        userId: String(info.userId ?? ""),
-        plan: String(info.plan ?? ""),
-        expiresAt: String(info.expiresAt ?? ""),
-        expired: Boolean(info.expired),
-        issuedAt,
-        active: true,
-    }, {eventType: "TOKEN_POOL_RECONCILED"});
 }
 
 function parseCmdEnvFile(): Record<string, string> {
@@ -946,86 +717,6 @@ function extractSmsCountries(payload: unknown): SmsCountryItem[] {
         .sort((a, b) => a.code - b.code);
 }
 
-function extractSmsBalance(payload: unknown): number | undefined {
-    if (typeof payload === "number") {
-        return Number.isFinite(payload) ? payload : undefined;
-    }
-    if (typeof payload === "string") {
-        const match = payload.match(/ACCESS_BALANCE[:：]\s*(-?\d+(?:\.\d+)?)/i) ?? payload.match(/-?\d+(?:\.\d+)?/);
-        if (!match) return undefined;
-        const balance = Number(match[1] ?? match[0]);
-        return Number.isFinite(balance) ? balance : undefined;
-    }
-    if (!isRecord(payload)) return undefined;
-    for (const key of ["balance", "Balance", "BALANCE", "money", "amount", "credits"]) {
-        if (key in payload) {
-            const balance = toFiniteNumber(payload[key]);
-            if (balance != null) return balance;
-        }
-    }
-    if (isRecord(payload.data)) return extractSmsBalance(payload.data);
-    return undefined;
-}
-
-async function getSmsBalances(): Promise<Record<string, unknown>> {
-    const config = readConfigSync();
-    const providers: Array<{
-        provider: EditableSmsProvider;
-        providerLabel: string;
-        apiKey: string;
-        baseUrl: string;
-    }> = [];
-    const smsbowerApiKey = asString(config.smsbowerApiKey);
-    const heroApiKey = asString(config.heroSMSApiKey);
-    if (smsbowerApiKey) {
-        providers.push({
-            provider: "smsbower",
-            providerLabel: "SmsBower",
-            apiKey: smsbowerApiKey,
-            baseUrl: normalizeSmsApiBaseUrl(asString(config.smsbowerBaseUrl), "https://smsbower.online/stubs/handler_api.php"),
-        });
-    }
-    if (heroApiKey) {
-        providers.push({
-            provider: "hero-sms",
-            providerLabel: "HeroSMS",
-            apiKey: heroApiKey,
-            baseUrl: normalizeSmsApiBaseUrl(asString(config.heroSMSBaseUrl), "https://hero-sms.com/stubs/handler_api.php"),
-        });
-    }
-
-    const items = await Promise.all(providers.map(async (provider) => {
-        try {
-            const payload = await fetchSmsApi(provider.baseUrl, provider.apiKey, "getBalance", {});
-            const balance = extractSmsBalance(payload);
-            if (balance == null) {
-                const payloadText = typeof payload === "string" ? payload : String(JSON.stringify(payload) ?? payload);
-                throw new Error(`无法解析余额: ${payloadText.slice(0, 160)}`);
-            }
-            return {
-                provider: provider.provider,
-                providerLabel: provider.providerLabel,
-                apiKeyMasked: maskSecret(provider.apiKey),
-                ok: true,
-                balance,
-                currency: "USD",
-                fetchedAt: nowIso(),
-            };
-        } catch (error) {
-            return {
-                provider: provider.provider,
-                providerLabel: provider.providerLabel,
-                apiKeyMasked: maskSecret(provider.apiKey),
-                ok: false,
-                error: error instanceof Error ? error.message : String(error),
-                fetchedAt: nowIso(),
-            };
-        }
-    }));
-
-    return {items, fetchedAt: nowIso()};
-}
-
 async function getSmsCountries(query: URLSearchParams): Promise<Record<string, unknown>> {
     const config = readConfigSync();
     const provider = normalizeEditableSmsProvider(query.get("provider") || config.smsProvider);
@@ -1330,12 +1021,6 @@ function getConfigSummary(): Record<string, unknown> {
             accountPriority: asNumber(config.sub2apiAccountPriority, 1),
             concurrency: asNumber(config.sub2apiConcurrency, 10),
         },
-        cpa: {
-            baseUrl: asString(config.cliproxyApiBaseUrl),
-            managementKeyPresent: Boolean(asString(config.cliproxyApiManagementKey)),
-            managementKeyMasked: asString(config.cliproxyApiManagementKey) ? maskSecret(asString(config.cliproxyApiManagementKey)) : "",
-            autoUploadAuth: Boolean(config.cliproxyApiAutoUploadAuth),
-        },
         mailApi: {
             baseUrl: getMailApiBaseUrl(),
         },
@@ -1423,30 +1108,6 @@ async function updateSub2ApiConfig(body: Record<string, unknown>): Promise<Recor
     config.sub2apiProxyName = proxyName;
     config.sub2apiAccountPriority = priority;
     config.sub2apiConcurrency = concurrency;
-
-    await writeJsonFile(configFile, config);
-    return getConfigSummary();
-}
-
-async function updateCpaConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const config = await readConfigForWrite();
-    const baseUrl = String(body.baseUrl ?? body.url ?? body.cliproxyApiBaseUrl ?? "").trim();
-    const managementKey = String(body.managementKey ?? body.key ?? body.cliproxyApiManagementKey ?? "");
-    if (!baseUrl) throw new Error("CPA 地址不能为空");
-    new URL(baseUrl);
-    if (!managementKey && !asString(config.cliproxyApiManagementKey)) {
-        throw new Error("CPA management key 不能为空");
-    }
-
-    config.cliproxyApiBaseUrl = baseUrl;
-    if (managementKey) config.cliproxyApiManagementKey = managementKey;
-    if (body.autoUploadAuth !== undefined || body.cliproxyApiAutoUploadAuth !== undefined) {
-        const rawAutoUpload = body.autoUploadAuth ?? body.cliproxyApiAutoUploadAuth;
-        config.cliproxyApiAutoUploadAuth = rawAutoUpload === true
-            || rawAutoUpload === "true"
-            || rawAutoUpload === "1"
-            || rawAutoUpload === "on";
-    }
 
     await writeJsonFile(configFile, config);
     return getConfigSummary();
@@ -1580,21 +1241,12 @@ function parseTaskOutputLine(task: RuntimeRegisterTask, line: string, options: {
     if (sub2apiCreatedMatch) {
         task.sub2apiAccount = sub2apiCreatedMatch[1].trim();
     }
-    const cpaAccountMatch = line.match(/\[cpa_account\]\s+(.+)$/);
-    if (cpaAccountMatch) {
-        task.cpaAccount = cpaAccountMatch[1].trim();
-        if (allowFinish) finishTaskFromSuccessfulOutput(task, "cpa_account");
-    }
-    const cpaCreatedMatch = line.match(/CPA 已入库账号:\s+(.+)$/);
-    if (cpaCreatedMatch) {
-        task.cpaAccount = cpaCreatedMatch[1].trim();
-    }
-    const oaBindMatch = line.match(/\[oa-(?:sub2api|cpa)\]\s+bind_email=(.+)$/);
+    const oaBindMatch = line.match(/\[oa-sub2api\]\s+bind_email=(.+)$/);
     if (oaBindMatch) {
         task.bindEmail = oaBindMatch[1].trim();
         updateTaskTitle(task);
     }
-    const oaMailboxMatch = line.match(/\[oa-(?:sub2api|cpa)\]\s+mailbox_url=(.+)$/);
+    const oaMailboxMatch = line.match(/\[oa-sub2api\]\s+mailbox_url=(.+)$/);
     if (oaMailboxMatch) {
         task.mailboxUrl = oaMailboxMatch[1].trim();
     }
@@ -1629,7 +1281,7 @@ function updateTaskTitle(task: RuntimeRegisterTask): void {
 
 function taskHasSuccessOutput(task: RuntimeRegisterTask): boolean {
     if (task.kind === "oa-sub2api") {
-        return task.oaTarget === "cpa" ? Boolean(task.cpaAccount) : Boolean(task.sub2apiAccount);
+        return Boolean(task.sub2apiAccount);
     }
     return Boolean(task.accessTokenHash);
 }
@@ -1667,6 +1319,10 @@ function finishRegisterTask(
         return false;
     }
 
+    if (task.startedAt) {
+        registerRunning = Math.max(0, registerRunning - 1);
+    }
+
     task.status = status;
     task.exitCode = options.code;
     task.signal = options.signal ?? null;
@@ -1675,15 +1331,8 @@ function finishRegisterTask(
     if (status === "failed" && !task.error) {
         task.error = `exit code ${options.code}`;
     }
-    if (status === "failed") {
-        const diagnosis = classifyTaskFailure(task);
-        task.errorType = diagnosis.errorType;
-        task.errorSuggestion = diagnosis.suggestion;
-    }
     if (status === "success") {
         task.error = undefined;
-        task.errorType = undefined;
-        task.errorSuggestion = undefined;
     }
 
     const removeTokenHash = task.kind === "oa-sub2api"
@@ -1709,57 +1358,21 @@ function finishRegisterTask(
         appendTaskLog(task, "system", "success captured; terminating lingering child process");
         killProcessTree(task.child);
     }
-    void syncTaskToAccountLedger(task, task.kind === "register" ? "REGISTER_TASK_FINISHED" : "OA_TASK_FINISHED").catch((error) => {
-        appendTaskLog(task, "system", `account ledger sync failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-    maybeReplenishAutoRegisterBatch(task);
     saveRegisterTasksLater();
     scheduleRegisterTasks();
     return true;
 }
 
-function maybeReplenishAutoRegisterBatch(task: RuntimeRegisterTask): void {
-    if (task.kind !== "register" || !task.batchId || !task.autoTargetSuccess || !task.autoMaxAttempts) return;
-    const batchTasks = Array.from(registerTasks.values()).filter((item) => item.kind === "register" && item.batchId === task.batchId);
-    const success = batchTasks.filter((item) => item.status === "success").length;
-    const active = batchTasks.filter((item) => item.status === "queued" || item.status === "running").length;
-    if (success >= task.autoTargetSuccess || active > 0 || batchTasks.length >= task.autoMaxAttempts) return;
-    const remainingSuccess = task.autoTargetSuccess - success;
-    const remainingAttempts = task.autoMaxAttempts - batchTasks.length;
-    const count = Math.max(0, Math.min(remainingSuccess, remainingAttempts));
-    if (!count) return;
-    appendTaskLog(task, "system", `auto-register replenish: creating ${count} more task(s) for batch ${task.batchId}`);
-    createRegisterTasks({
-        count,
-        concurrency: taskMaxConcurrency.register,
-        tokenOut: task.tokenOut,
-        batchId: task.batchId,
-        autoTargetSuccess: task.autoTargetSuccess,
-        autoMaxAttempts: task.autoMaxAttempts,
-    });
-}
-
 function scheduleRegisterTasks(): void {
-    let started = true;
-    while (started) {
-        started = false;
-        for (let index = 0; index < registerQueue.length; index += 1) {
-            const task = registerQueue[index];
-            if (!task || task.status !== "queued") {
-                registerQueue.splice(index, 1);
-                index -= 1;
-                continue;
-            }
-            if (runningTaskCount(task.kind) >= taskMaxConcurrency[task.kind]) continue;
-            registerQueue.splice(index, 1);
-            startRegisterTask(task);
-            started = true;
-            break;
-        }
+    while (registerRunning < registerMaxConcurrency && registerQueue.length > 0) {
+        const task = registerQueue.shift();
+        if (!task || task.status !== "queued") continue;
+        startRegisterTask(task);
     }
 }
 
 function startRegisterTask(task: RuntimeRegisterTask): void {
+    registerRunning += 1;
     task.status = "running";
     task.startedAt = nowIso();
     task.updatedAt = task.startedAt;
@@ -1800,17 +1413,7 @@ function startRegisterTask(task: RuntimeRegisterTask): void {
 function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
     const count = safeNumber(body.count, 10, 1, 100);
     const concurrency = safeNumber(body.concurrency, 10, 1, 10);
-    const batchId = String(body.batchId ?? "").trim() || makeBatchId();
-    const accountId = String(body.accountId ?? "").trim() || undefined;
-    const workflowRunId = String(body.workflowRunId ?? "").trim() || undefined;
-    const workflowStep = String(body.workflowStep ?? "").trim() || undefined;
-    const bindEmail = String(body.bindEmail ?? "").trim();
-    const mailboxUrl = String(body.mailboxUrl ?? "").trim();
-    const emailRaw = String(body.emailRaw ?? "").trim();
-    const flowMode = normalizeTaskFlowMode(body.flowMode, bindEmail ? "free" : "phone-register");
-    const autoTargetSuccess = body.autoTargetSuccess == null ? undefined : safeNumber(body.autoTargetSuccess, count, 1, 100);
-    const autoMaxAttempts = body.autoMaxAttempts == null ? undefined : safeNumber(body.autoMaxAttempts, Math.max(count, autoTargetSuccess ?? count), 1, 300);
-    taskMaxConcurrency.register = concurrency;
+    registerMaxConcurrency = concurrency;
 
     const ppxy = getPpxyConfig();
     const tokenOut = path.resolve(String(body.tokenOut || ppxy.tokenFile));
@@ -1830,37 +1433,17 @@ function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
             kind: "register",
             status: "queued",
             title: `phone register #${i + 1}`,
-            accountId: count === 1 ? accountId : undefined,
-            workflowRunId,
-            workflowStep,
-            batchId,
-            flowMode,
-            autoTargetSuccess,
-            autoMaxAttempts,
             createdAt: nowIso(),
             updatedAt: nowIso(),
-            args: [
-                "src/index.ts",
-                "--phone",
-                "--at",
-                "--st",
-                "--gp-token-out",
-                tokenOut,
-                ...(bindEmail ? ["--bind-email", bindEmail] : []),
-                ...(mailboxUrl ? ["--mailbox-url", mailboxUrl] : []),
-                ...(emailRaw ? ["--email-raw", emailRaw] : []),
-            ],
+            args: ["src/index.ts", "--phone", "--at", "--st", "--gp-token-out", tokenOut],
             tokenOut,
-            bindEmail: bindEmail || undefined,
-            mailboxUrl: mailboxUrl || undefined,
-            emailRaw: emailRaw || undefined,
             logs: [],
             env,
         };
         registerTasks.set(id, task);
         registerQueue.push(task);
         created.push(task);
-        appendTaskLog(task, "system", `queued batchId=${batchId} tokenOut=${tokenOut}`);
+        appendTaskLog(task, "system", `queued tokenOut=${tokenOut}`);
     }
     saveRegisterTasksLater();
     scheduleRegisterTasks();
@@ -1934,20 +1517,16 @@ function setOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {
         status,
         phone: patch.phone ?? current?.phone,
         taskId: patch.taskId ?? current?.taskId,
-        target: patch.target ?? current?.target,
         sub2apiAccount: patch.sub2apiAccount ?? current?.sub2apiAccount,
-        cpaAccount: patch.cpaAccount ?? current?.cpaAccount,
         accessTokenHash: patch.accessTokenHash ?? current?.accessTokenHash,
-        error: status === "bound" || status === "free" ? undefined : patch.error ?? current?.error,
+        error: patch.error ?? current?.error,
         note: patch.note ?? current?.note,
         updatedAt: nowIso(),
     };
     if (status === "free") {
         delete next.phone;
         delete next.taskId;
-        delete next.target;
         delete next.sub2apiAccount;
-        delete next.cpaAccount;
         delete next.accessTokenHash;
         delete next.error;
     }
@@ -1958,43 +1537,21 @@ function setOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {
 async function updateOaEmailStatus(email: string, patch: Partial<OaEmailStatusRecord> & {status?: OaEmailBindStatus}): Promise<OaEmailStatusRecord> {
     const next = setOaEmailStatus(email, patch);
     await saveOaEmailStatus();
-    await syncOaEmailStatusToAccountLedger(next, "OA_EMAIL_STATUS_UPDATED");
     return next;
-}
-
-async function syncOaEmailStatusToAccountLedger(status: OaEmailStatusRecord, eventType?: string): Promise<AccountRecord | null> {
-    return accountLedger.upsertFromEmailStatus({
-        email: status.email,
-        status: status.status,
-        phone: status.phone,
-        taskId: status.taskId,
-        target: status.target,
-        sub2apiAccount: status.sub2apiAccount,
-        cpaAccount: status.cpaAccount,
-        accessTokenHash: status.accessTokenHash,
-        error: status.error,
-        note: status.note,
-        updatedAt: status.updatedAt,
-    }, {eventType});
 }
 
 function recordOaTaskEmailStatus(task: RuntimeRegisterTask, status: OaEmailBindStatus, error = ""): void {
     if (task.kind !== "oa-sub2api" || !task.bindEmail) return;
-    const next = setOaEmailStatus(task.bindEmail, {
+    setOaEmailStatus(task.bindEmail, {
         status,
         phone: task.phone,
         taskId: task.id,
-        target: task.oaTarget || "sub2api",
         sub2apiAccount: task.sub2apiAccount,
-        cpaAccount: task.cpaAccount,
         accessTokenHash: task.accessTokenHash,
         error: error || task.error,
         note: `oauth ${status}`,
     });
     saveOaEmailStatusLater();
-    void syncOaEmailStatusToAccountLedger(next, "OA_EMAIL_STATUS_RECORDED").catch((ledgerError) => {
-        console.error(`sync oa email status failed: ${ledgerError instanceof Error ? ledgerError.message : String(ledgerError)}`);
-    });
 }
 
 function getOaEmailAssignments(): Map<string, RuntimeRegisterTask> {
@@ -2014,14 +1571,6 @@ function resolveOaSavedBindStatus(itemEmail: string, savedStatus?: OaEmailStatus
     if (savedStatus.status !== "reserved") return savedStatus.status;
     const taskId = savedStatus.taskId?.trim();
     if (!taskId) return "free";
-    if (taskId.startsWith("wf_")) {
-        const workflow = workflows.get(taskId);
-        if (!workflow) return "free";
-        if (workflow.status === "success") return "bound";
-        if (workflow.status === "failed") return "failed";
-        if (workflow.status === "canceled") return "canceled";
-        return "reserved";
-    }
     const task = registerTasks.get(taskId);
     if (!task || task.kind !== "oa-sub2api" || task.bindEmail?.toLowerCase() !== itemEmail.toLowerCase()) {
         return "free";
@@ -2047,7 +1596,7 @@ async function readOaEmailPool(): Promise<OaEmailPoolItem[]> {
             const bindStatus = assignedTask
                 ? "reserved"
                 : resolveOaSavedBindStatus(item.email, savedStatus);
-            const reusableStatus = bindStatus === "free" || bindStatus === "canceled";
+            const reusableStatus = bindStatus === "free" || bindStatus === "failed" || bindStatus === "canceled";
             return {
                 index,
                 email: item.email,
@@ -2062,9 +1611,7 @@ async function readOaEmailPool(): Promise<OaEmailPoolItem[]> {
                 bindStatus,
                 bindPhone: assignedTask?.phone ?? savedStatus?.phone,
                 bindTaskId: assignedTask?.id ?? savedStatus?.taskId,
-                bindTarget: assignedTask?.oaTarget ?? savedStatus?.target,
                 bindSub2ApiAccount: savedStatus?.sub2apiAccount,
-                bindCpaAccount: savedStatus?.cpaAccount,
                 bindAccessTokenHash: savedStatus?.accessTokenHash,
                 bindError: savedStatus?.error,
                 bindUpdatedAt: savedStatus?.updatedAt,
@@ -2237,13 +1784,6 @@ function normalizeOaEmailBindStatus(value: unknown): OaEmailBindStatus {
     throw new Error("邮箱状态只能是 free/reserved/bound/failed/canceled/disabled");
 }
 
-function normalizeOaTarget(value: unknown, fallback: OaTarget = "sub2api"): OaTarget {
-    const text = String(value ?? "").trim().toLowerCase();
-    if (text === "cpa") return "cpa";
-    if (text === "sub2api" || text === "sub2-api" || text === "sub") return "sub2api";
-    return fallback;
-}
-
 function normalizeOaBindPhone(value: string): string {
     const compact = value.trim().replace(/[\s()-]/g, "");
     if (!compact) return "";
@@ -2270,9 +1810,7 @@ async function patchOaEmailStatus(email: string, body: Record<string, unknown>):
         status,
         phone,
         taskId: asString(body.taskId ?? body.bindTaskId),
-        target: normalizeOaTarget(body.target ?? body.bindTarget, getOaEmailStatus(target)?.target ?? "sub2api"),
         sub2apiAccount: asString(body.sub2apiAccount ?? body.bindSub2ApiAccount),
-        cpaAccount: asString(body.cpaAccount ?? body.bindCpaAccount),
         accessTokenHash: asString(body.accessTokenHash ?? body.bindAccessTokenHash),
         error: asString(body.error ?? body.bindError),
         note: asString(body.note ?? body.bindNote),
@@ -2298,39 +1836,9 @@ function getPhoneFromToken(token: string): string {
     return "";
 }
 
-async function withOaTaskCreateLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = oaTaskCreateQueue;
-    let release: () => void = () => undefined;
-    oaTaskCreateQueue = new Promise<void>((resolve) => {
-        release = resolve;
-    });
-    await previous.catch(() => undefined);
-    try {
-        return await fn();
-    } finally {
-        release();
-    }
-}
-
-function getActiveOaTokenAssignments(): Map<string, RuntimeRegisterTask> {
-    const assigned = new Map<string, RuntimeRegisterTask>();
-    for (const task of registerTasks.values()) {
-        if (task.kind !== "oa-sub2api") continue;
-        if (!["queued", "running"].includes(task.status)) continue;
-        const hash = task.sourceAccessTokenHash || task.accessTokenHash;
-        if (hash && !assigned.has(hash)) assigned.set(hash, task);
-    }
-    return assigned;
-}
-
 async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<RegisterTask[]> {
-    return withOaTaskCreateLock(() => createOaSub2ApiTasksLocked(body));
-}
-
-async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promise<RegisterTask[]> {
-    const target = normalizeOaTarget(body.target ?? body.oaTarget, "sub2api");
     const concurrency = safeNumber(body.concurrency, 1, 1, 10);
-    taskMaxConcurrency["oa-sub2api"] = concurrency;
+    registerMaxConcurrency = concurrency;
 
     const ppxy = getPpxyConfig();
     const tokenOut = path.resolve(String(body.tokenOut || ppxy.tokenFile));
@@ -2340,80 +1848,23 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
     const oaProxyUrl = rawOaProxyUrl.toLowerCase() === "direct"
         ? ""
         : rawOaProxyUrl || getOaProxyUrl(config);
-    const cpaBaseUrl = String(body.cpaBaseUrl ?? body.cpaUrl ?? asString(config.cliproxyApiBaseUrl)).trim();
-    const cpaManagementKey = String(body.cpaManagementKey ?? body.cpaKey ?? asString(config.cliproxyApiManagementKey)).trim();
-    if (target === "cpa") {
-        if (!cpaBaseUrl) throw new Error("CPA 地址不能为空；请先保存 CPA 配置");
-        new URL(cpaBaseUrl);
-        if (!cpaManagementKey) throw new Error("CPA management key 不能为空；请先保存 CPA 配置");
-    }
     const removeTokenOnSuccess = Boolean(body.removeTokenOnSuccess);
-    const accountId = String(body.accountId ?? "").trim() || undefined;
-    const workflowRunId = String(body.workflowRunId ?? "").trim() || undefined;
-    const workflowStep = String(body.workflowStep ?? "").trim() || undefined;
-    const batchId = String(body.batchId ?? "").trim() || undefined;
-    const flowMode = normalizeTaskFlowMode(body.flowMode, workflowRunId ? "free" : "oa-only");
-    const retrySourceTaskId = String(body.retrySourceTaskId ?? "").trim() || undefined;
     const countLimit = safeNumber(body.count, 100, 1, 500);
     const selectedHashes = Array.isArray(body.tokenHashes)
         ? body.tokenHashes.map((item) => String(item).trim()).filter(Boolean)
         : [];
-    const selectedEmails = Array.isArray(body.emails)
-        ? body.emails.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
-        : parseStringList(body.email ?? body.bindEmail ?? body.selectedEmail).map((item) => item.toLowerCase());
-    const allAvailableEmails = (await readOaEmailPool()).filter((item) => {
-        if (item.available) return true;
-        if (!selectedEmails.includes(item.email.toLowerCase())) return false;
-        const savedStatus = getOaEmailStatus(item.email);
-        if (retrySourceTaskId && savedStatus?.taskId === retrySourceTaskId && (savedStatus.status === "failed" || savedStatus.status === "canceled")) {
-            return true;
-        }
-        if (!workflowRunId) return false;
-        return savedStatus?.status === "reserved" && savedStatus.taskId === workflowRunId;
-    });
-    const emails = selectedEmails.length
-        ? allAvailableEmails.filter((item) => selectedEmails.includes(item.email.toLowerCase()))
-        : allAvailableEmails;
-    if (selectedEmails.length) {
-        const availableEmailSet = new Set(emails.map((item) => item.email.toLowerCase()));
-        const missingEmails = selectedEmails.filter((item) => !availableEmailSet.has(item));
-        if (missingEmails.length) {
-            throw new Error(`指定邮箱不可用或不存在：${missingEmails.join(", ")}`);
-        }
-    }
-    if (selectedHashes.length && selectedEmails.length && selectedHashes.length !== selectedEmails.length) {
-        throw new Error(`指定号码数量(${selectedHashes.length})与指定邮箱数量(${selectedEmails.length})不一致`);
-    }
+    const emails = (await readOaEmailPool()).filter((item) => item.available);
     if (!emails.length) throw new Error("没有未绑定可用邮箱；请先导入 邮箱-----接码地址 或 邮箱----密码----clientId----refreshToken");
 
-    const activeTokenAssignments = getActiveOaTokenAssignments();
-    const tokens = await readTokenPool(tokenOut);
-    const availableTokenItems = tokens
+    const tokens = await readTokenPool();
+    const tokenItems = tokens
         .map((token) => ({token, hash: tokenHash(token), phone: getPhoneFromToken(token)}))
         .filter((item) => item.phone)
         .filter((item) => atMeta.oa[item.hash]?.enabled !== false)
-        .filter((item) => {
-            const assigned = activeTokenAssignments.get(item.hash);
-            return !assigned || assigned.workflowRunId === workflowRunId;
-        });
-    if (selectedHashes.length) {
-        const availableHashSet = new Set(availableTokenItems.map((item) => item.hash));
-        const missingHashes = selectedHashes.filter((item) => !availableHashSet.has(item));
-        if (missingHashes.length) {
-            throw new Error(`指定号码不可用或不存在：${missingHashes.map((item) => item.slice(0, 10)).join(", ")}`);
-        }
-    }
-    const tokenItems = availableTokenItems
         .filter((item) => !selectedHashes.length || selectedHashes.includes(item.hash))
         .slice(0, Math.min(countLimit, emails.length));
     if (!tokenItems.length) {
         throw new Error("没有可用的 AT+手机号；请确认 AT 池 token 里能解析 phone_number");
-    }
-    if (selectedHashes.length && tokenItems.length < selectedHashes.length) {
-        throw new Error(`可用邮箱不足：已选 ${selectedHashes.length} 个号码，但只有 ${emails.length} 个可用邮箱`);
-    }
-    if (selectedEmails.length && tokenItems.length < selectedEmails.length) {
-        throw new Error(`可用号码不足：已选 ${selectedEmails.length} 个邮箱，但只有 ${tokenItems.length} 个可用 AT+手机号`);
     }
 
     await assertOaOpenAiReachable(oaProxyUrl);
@@ -2422,17 +1873,13 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
     envBase.OPENAI_PROXY_URL = oaProxyUrl;
     envBase.DEFAULT_PROXY_URL = oaProxyUrl;
     envBase.SENTINEL_BROWSER_PROXY = oaProxyUrl;
-    if (target === "cpa") {
-        envBase.CPA_BASE_URL = cpaBaseUrl;
-        envBase.CPA_MANAGEMENT_KEY = cpaManagementKey;
-    }
     const created: RegisterTask[] = [];
     for (let i = 0; i < tokenItems.length; i += 1) {
         const tokenItem = tokenItems[i];
         const emailItem = emails[i];
         const id = `oa_${Date.now()}_${randomUUID().slice(0, 8)}`;
         const args = [
-            target === "cpa" ? "src/oa-cpa.ts" : "src/oa-sub2api.ts",
+            "src/oa-sub2api.ts",
             "--st",
             "--phone", tokenItem.phone,
             "--bind-email", emailItem.email,
@@ -2457,11 +1904,6 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
             kind: "oa-sub2api",
             status: "queued",
             title: `OA ${tokenItem.phone} -> ${emailItem.email}`,
-            accountId: tokenItems.length === 1 ? accountId : undefined,
-            workflowRunId,
-            workflowStep,
-            batchId,
-            flowMode,
             createdAt: nowIso(),
             updatedAt: nowIso(),
             args,
@@ -2471,77 +1913,29 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
             mailboxUrl: emailItem.mailboxUrl,
             emailRaw: emailItem.raw,
             oaProxyUrl: maskUrlSecret(oaProxyUrl),
-            oaTarget: target,
             sourceAccessTokenHash: tokenItem.hash,
             accessTokenHash: tokenItem.hash,
             accessTokenPreview: tokenPreview(tokenItem.token),
-            sub2apiGroup: target === "sub2api" ? String(body.sub2apiGroup || asString(config.sub2apiGroupName, "codex")) : undefined,
+            sub2apiGroup: String(body.sub2apiGroup || asString(config.sub2apiGroupName, "codex")),
             logs: [],
             env: envBase,
         };
         registerTasks.set(id, task);
         registerQueue.push(task);
-        const emailStatus = setOaEmailStatus(emailItem.email, {
+        setOaEmailStatus(emailItem.email, {
             status: "reserved",
             phone: tokenItem.phone,
             taskId: id,
-            target,
             accessTokenHash: tokenItem.hash,
-            note: `queued oa-${target}`,
+            note: "queued oa-sub2api",
         });
         created.push(task);
-        appendTaskLog(task, "system", `queued oa-${target} phone=${tokenItem.phone} bindEmail=${emailItem.email} proxy=${maskUrlSecret(oaProxyUrl) || "direct"}${target === "cpa" ? ` cpa=${maskUrlSecret(cpaBaseUrl)}` : ""}`);
-        await syncTaskToAccountLedger(task, "OA_TASK_RESERVED");
-        await syncOaEmailStatusToAccountLedger(emailStatus, "OA_EMAIL_RESERVED");
+        appendTaskLog(task, "system", `queued oa-sub2api phone=${tokenItem.phone} bindEmail=${emailItem.email} proxy=${maskUrlSecret(oaProxyUrl) || "direct"}`);
     }
     saveOaEmailStatusLater();
     saveRegisterTasksLater();
     scheduleRegisterTasks();
     return created;
-}
-
-async function retryOaTask(task: RuntimeRegisterTask, body: Record<string, unknown> = {}): Promise<RuntimeRegisterTask> {
-    if (task.kind !== "oa-sub2api") throw new Error("only OA tasks can be retried");
-    if (task.status === "queued" || task.status === "running") throw new Error(`task is ${task.status}`);
-    const hash = task.sourceAccessTokenHash || task.accessTokenHash;
-    if (!hash) throw new Error("source token hash is missing; cannot retry");
-    if (!task.bindEmail) throw new Error("bind email is missing; cannot retry");
-
-    const workflow = task.workflowRunId ? workflows.get(task.workflowRunId) : undefined;
-    const [created] = await createOaSub2ApiTasks({
-        count: 1,
-        concurrency: body.concurrency ?? taskMaxConcurrency["oa-sub2api"],
-        target: task.oaTarget || "sub2api",
-        tokenHashes: [hash],
-        emails: [task.bindEmail],
-        retrySourceTaskId: task.id,
-        accountId: task.accountId,
-        workflowRunId: task.workflowRunId,
-        workflowStep: task.workflowStep || "oa",
-        batchId: task.batchId,
-        flowMode: task.flowMode || (workflow?.freeMode ? "free" : workflow ? "phone-plus-oa" : "oa-only"),
-        password: body.password ?? "",
-        oaProxyUrl: body.oaProxyUrl ?? task.oaProxyUrl ?? "",
-        sub2apiGroup: body.sub2apiGroup ?? task.sub2apiGroup ?? "",
-        tokenOut: body.tokenOut ?? task.tokenOut,
-        removeTokenOnSuccess: body.removeTokenOnSuccess === true || task.args.includes("--remove-token-on-success"),
-    });
-    const retryTask = created as RuntimeRegisterTask;
-    appendTaskLog(retryTask, "system", `retry of ${task.id}`);
-    appendTaskLog(task, "system", `retry created: ${retryTask.id}`);
-
-    if (workflow) {
-        workflow.oaTaskId = retryTask.id;
-        workflow.status = "running";
-        workflow.step = "oa";
-        workflow.error = undefined;
-        workflow.finishedAt = undefined;
-        workflowLog(workflow, `oa retry created from ${task.id}: ${retryTask.id}`);
-        saveWorkflowsLater();
-        void runPhonePlusOaWorkflow(workflow.runId);
-    }
-    saveRegisterTasksLater();
-    return retryTask;
 }
 
 function cancelRegisterTask(task: RuntimeRegisterTask): void {
@@ -2611,11 +2005,6 @@ function tokenInfo(token: string, index: number): Record<string, unknown> {
     const phone = getPhoneFromToken(token);
     const oaMeta = atMeta.oa[hash];
     const oaEligible = Boolean(phone) && oaMeta?.enabled !== false;
-    const expired = exp ? Date.now() > exp * 1000 : false;
-    const trial = atMeta.trial[hash];
-    const usableForPlus = !expired && trial?.eligible !== false;
-    const usableForOA = !expired && oaEligible;
-    const riskLevel = expired ? "high" : (!phone || trial?.eligible === false) ? "medium" : "low";
     return {
         index,
         hash,
@@ -2627,15 +2016,8 @@ function tokenInfo(token: string, index: number): Record<string, unknown> {
         plan: String(auth.chatgpt_plan_type ?? ""),
         exp,
         expiresAt: exp ? new Date(exp * 1000).toISOString() : "",
-        expired,
-        quality: {
-            usableForOA,
-            usableForPlus,
-            hasPhone: Boolean(phone),
-            riskLevel,
-            lastCheckAt: trial?.checkedAt ?? "",
-        },
-        trial,
+        expired: exp ? Date.now() > exp * 1000 : false,
+        trial: atMeta.trial[hash],
         oa: {
             enabled: oaMeta?.enabled ?? null,
             eligible: oaEligible,
@@ -2653,8 +2035,8 @@ function tokenFullInfo(token: string, index: number): Record<string, unknown> {
     };
 }
 
-async function readTokenPool(filePathInput?: string): Promise<string[]> {
-    const filePath = path.resolve(filePathInput || getPpxyConfig().tokenFile);
+async function readTokenPool(): Promise<string[]> {
+    const filePath = getPpxyConfig().tokenFile;
     try {
         const raw = await readFile(filePath, "utf8");
         return raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -2807,10 +2189,6 @@ async function importTokens(raw: string): Promise<{added: number; skipped: numbe
     }
     if (added.length) {
         await writeTokenPool([...existing, ...added]);
-        const tokenFile = getPpxyConfig().tokenFile;
-        for (const token of added) {
-            await syncTokenToAccountLedger(token, tokenFile);
-        }
     }
     return {added: added.length, skipped: incoming.length - added.length, total: existing.length + added.length};
 }
@@ -2820,7 +2198,6 @@ async function removeTokenByHash(hash: string): Promise<boolean> {
     const next = tokens.filter((token) => tokenHash(token) !== hash);
     if (next.length === tokens.length) return false;
     await writeTokenPool(next);
-    await accountLedger.markTokenActive(hash, false, {eventType: "AT_REMOVED_FROM_POOL"});
     return true;
 }
 
@@ -2960,8 +2337,6 @@ async function createPlusJob(body: Record<string, unknown>): Promise<PlusJobReco
     const record: PlusJobRecord = {
         localId: `plus_${Date.now()}_${randomUUID().slice(0, 8)}`,
         jobId,
-        accountId: String(body.accountId ?? "").trim() || undefined,
-        workflowRunId: String(body.workflowRunId ?? "").trim() || undefined,
         status: String(data.status ?? "queued"),
         clientRef,
         tokenHash: tokenHashFromBody || hash,
@@ -2982,7 +2357,6 @@ async function createPlusJob(body: Record<string, unknown>): Promise<PlusJobReco
     };
     plusJobs.set(record.localId, record);
     await savePlusJobs();
-    await syncPlusJobToAccountLedger(record, "PLUS_JOB_CREATED");
     startPlusPolling(record.localId);
     return record;
 }
@@ -3017,7 +2391,6 @@ async function refreshPlusJob(record: PlusJobRecord): Promise<PlusJobRecord> {
         record.updatedAt = nowIso();
     }
     await savePlusJobs();
-    await syncPlusJobToAccountLedger(record, record.done ? "PLUS_JOB_FINISHED" : "PLUS_JOB_UPDATED");
     return record;
 }
 
@@ -3062,644 +2435,8 @@ async function submitPlusOtp(record: PlusJobRecord, pin: string): Promise<unknow
     record.response = result.data;
     record.updatedAt = nowIso();
     await savePlusJobs();
-    await syncPlusJobToAccountLedger(record, "PLUS_OTP_SUBMITTED");
     startPlusPolling(record.localId);
     return result.data;
-}
-
-function workflowLog(workflow: WorkflowRecord, message: string): void {
-    workflow.logs.push(`[${new Date().toLocaleString()}] ${message}`);
-    if (workflow.logs.length > 300) workflow.logs.splice(0, workflow.logs.length - 300);
-    workflow.updatedAt = nowIso();
-}
-
-function publicWorkflow(workflow: WorkflowRecord): WorkflowRecord {
-    return {...workflow, logs: workflow.logs.slice(-200)};
-}
-
-async function waitForRegisterTask(taskId: string, workflow: WorkflowRecord): Promise<RuntimeRegisterTask> {
-    for (;;) {
-        const task = registerTasks.get(taskId);
-        if (!task) throw new Error(`task not found: ${taskId}`);
-        if (task.status === "success") return task;
-        if (task.status === "failed" || task.status === "canceled") {
-            throw new Error(task.error || `task ${task.id} ${task.status}`);
-        }
-        if (workflow.status === "canceled") throw new Error("workflow canceled");
-        await delay(2500);
-    }
-}
-
-async function waitForPlusJob(jobLocalId: string, workflow: WorkflowRecord): Promise<PlusJobRecord | "awaiting_plus_otp"> {
-    for (;;) {
-        const job = plusJobs.get(jobLocalId);
-        if (!job) throw new Error(`plus job not found: ${jobLocalId}`);
-        await refreshPlusJob(job);
-        if (job.otpPending && !job.done) return "awaiting_plus_otp";
-        if (job.done || job.status === "success" || job.status === "failed") return job;
-        if (workflow.status === "canceled") throw new Error("workflow canceled");
-        await delay(5000);
-    }
-}
-
-async function finalizeWorkflowOaSuccess(workflow: WorkflowRecord, oaTask: RuntimeRegisterTask): Promise<void> {
-    const account = await syncTaskToAccountLedger(oaTask, "WORKFLOW_OA_DONE");
-    workflow.accountId = account?.id ?? workflow.accountId;
-    workflow.bindEmail = oaTask.bindEmail ?? workflow.bindEmail;
-    workflow.sub2apiAccount = oaTask.sub2apiAccount;
-    workflow.cpaAccount = oaTask.cpaAccount;
-    if (workflow.freeMode || (!workflow.plusEnabled && workflow.target === "sub2api")) {
-        const freeAccount = await accountLedger.markFree(
-            {
-                id: workflow.accountId,
-                tokenHash: workflow.tokenHash,
-                phone: workflow.phone,
-                oaTaskId: workflow.oaTaskId,
-                email: workflow.bindEmail,
-            },
-            {
-                workflowRunId: workflow.runId,
-                completedAt: oaTask.finishedAt ?? nowIso(),
-                target: workflow.target,
-                note: "free flow: register -> OA/SUB2API, plus skipped",
-            },
-            {eventType: "WORKFLOW_FREE_DONE"},
-        );
-        workflow.accountId = freeAccount?.id ?? workflow.accountId;
-        workflowLog(workflow, "free_done");
-    }
-}
-
-async function reserveWorkflowEmailLocked(workflow: WorkflowRecord): Promise<string | undefined> {
-    if (workflow.oaTaskId || workflow.bindEmail) return workflow.bindEmail;
-    if (workflow.target !== "sub2api") return undefined;
-    const [emailItem] = (await readOaEmailPool()).filter((item) => item.available);
-    if (!emailItem) throw new Error("no available OA email for free workflow");
-    workflow.bindEmail = emailItem.email;
-    workflow.bindMailboxUrl = emailItem.mailboxUrl;
-    workflow.bindEmailRaw = emailItem.raw;
-    const emailStatus = setOaEmailStatus(emailItem.email, {
-        status: "reserved",
-        taskId: workflow.runId,
-        target: workflow.target,
-        note: `reserved for workflow ${workflow.runId}`,
-    });
-    await saveOaEmailStatus();
-    await syncOaEmailStatusToAccountLedger(emailStatus, "OA_EMAIL_RESERVED_FOR_WORKFLOW");
-    workflowLog(workflow, `email_reserved email=${emailItem.email}`);
-    saveWorkflowsLater();
-    return workflow.bindEmail;
-}
-
-async function reserveWorkflowEmail(workflow: WorkflowRecord): Promise<string | undefined> {
-    return withOaTaskCreateLock(() => reserveWorkflowEmailLocked(workflow));
-}
-
-async function releaseWorkflowEmailReservation(workflow: WorkflowRecord, status: OaEmailBindStatus, error = ""): Promise<void> {
-    if (!workflow.bindEmail || workflow.oaTaskId) return;
-    const current = getOaEmailStatus(workflow.bindEmail);
-    if (current?.taskId !== workflow.runId) return;
-    const next = setOaEmailStatus(workflow.bindEmail, {
-        status,
-        target: workflow.target,
-        error,
-        note: `workflow ${workflow.runId} ${status}`,
-    });
-    await saveOaEmailStatus();
-    await syncOaEmailStatusToAccountLedger(next, "OA_EMAIL_WORKFLOW_RESERVATION_RELEASED");
-}
-
-function recoverWorkflowTokenFromOaTask(workflow: WorkflowRecord, task: RuntimeRegisterTask): void {
-    workflow.tokenHash = workflow.tokenHash ?? task.sourceAccessTokenHash ?? task.accessTokenHash;
-    workflow.phone = workflow.phone ?? task.phone;
-    workflow.bindEmail = workflow.bindEmail ?? task.bindEmail;
-    if (task.accountId && !workflow.accountId) workflow.accountId = task.accountId;
-}
-
-function recoverWorkflowTokenFromRegisterTask(workflow: WorkflowRecord, task: RuntimeRegisterTask): void {
-    workflow.phone = task.phone ?? workflow.phone;
-    workflow.tokenHash = task.accessTokenHash ?? workflow.tokenHash;
-    if (task.accountId && !workflow.accountId) workflow.accountId = task.accountId;
-}
-
-function isRestartInterruptedTask(task: RuntimeRegisterTask): boolean {
-    return Boolean(task.error?.includes("server restarted before task finished"));
-}
-
-async function runPhonePlusOaWorkflow(runId: string): Promise<void> {
-    if (runningWorkflows.has(runId)) return;
-    const workflow = workflows.get(runId);
-    if (!workflow || ["success", "failed", "canceled"].includes(workflow.status)) return;
-    runningWorkflows.add(runId);
-    try {
-        workflow.status = "running";
-        workflow.finishedAt = undefined;
-        workflow.error = undefined;
-        workflowLog(workflow, `workflow running step=${workflow.step}`);
-        saveWorkflowsLater();
-
-        if (workflow.freeMode) {
-            await reserveWorkflowEmail(workflow);
-        }
-
-        if (workflow.oaTaskId) {
-            const existingOaTask = registerTasks.get(workflow.oaTaskId);
-            if (existingOaTask?.status === "success") {
-                workflow.step = "oa";
-                recoverWorkflowTokenFromOaTask(workflow, existingOaTask);
-                await finalizeWorkflowOaSuccess(workflow, existingOaTask);
-                workflow.step = "done";
-                workflow.status = "success";
-                workflow.finishedAt = nowIso();
-                workflowLog(workflow, `workflow success email=${workflow.bindEmail || ""}`);
-                await accountLedger.appendEvent({
-                    type: "WORKFLOW_SUCCESS",
-                    accountId: workflow.accountId ?? "",
-                    source: "workflow",
-                    sourceId: workflow.runId,
-                    payload: {
-                        phone: workflow.phone,
-                        tokenHash: workflow.tokenHash,
-                        bindEmail: workflow.bindEmail,
-                        target: workflow.target,
-                        sub2apiAccount: workflow.sub2apiAccount,
-                        cpaAccount: workflow.cpaAccount,
-                    },
-                });
-                return;
-            }
-            if (existingOaTask && ["failed", "canceled"].includes(existingOaTask.status)) {
-                workflowLog(workflow, `previous oa task ${existingOaTask.status}; creating replacement`);
-                workflow.oaTaskId = undefined;
-                workflow.bindEmail = existingOaTask.bindEmail ?? workflow.bindEmail;
-                workflow.bindMailboxUrl = existingOaTask.mailboxUrl ?? workflow.bindMailboxUrl;
-                workflow.bindEmailRaw = existingOaTask.emailRaw ?? workflow.bindEmailRaw;
-            }
-        }
-
-        if (workflow.registerTaskId) {
-            const existingRegisterTask = registerTasks.get(workflow.registerTaskId);
-            if (!existingRegisterTask) {
-                workflowLog(workflow, `previous register task missing; creating replacement`);
-                workflow.registerTaskId = undefined;
-            } else if (["failed", "canceled"].includes(existingRegisterTask.status) && isRestartInterruptedTask(existingRegisterTask)) {
-                workflowLog(workflow, `previous register task interrupted by restart; creating replacement`);
-                workflow.registerTaskId = undefined;
-                workflow.phone = undefined;
-                workflow.tokenHash = undefined;
-            }
-        }
-
-        if (!workflow.registerTaskId) {
-            workflow.step = "register";
-            workflowLog(workflow, "register_created");
-            const [task] = createRegisterTasks({
-                count: 1,
-                concurrency: workflow.options.registerConcurrency,
-                tokenOut: workflow.options.tokenOut,
-                batchId: workflow.batchId,
-                bindEmail: workflow.bindEmail,
-                mailboxUrl: workflow.bindMailboxUrl,
-                emailRaw: workflow.bindEmailRaw,
-                flowMode: workflow.freeMode ? "free" : "phone-plus-oa",
-                sentinelBrowserProxy: workflow.options.sentinelBrowserProxy,
-                sentinelBrowserPath: workflow.options.sentinelBrowserPath,
-                accountId: workflow.accountId,
-                workflowRunId: workflow.runId,
-                workflowStep: "register",
-            }) as RuntimeRegisterTask[];
-            workflow.registerTaskId = task.id;
-            workflow.accountId = task.accountId;
-            saveWorkflowsLater();
-        }
-
-        const loadedRegisterTask = registerTasks.get(workflow.registerTaskId);
-        if (!loadedRegisterTask) throw new Error(`task not found: ${workflow.registerTaskId}`);
-        if (loadedRegisterTask.status === "failed" || loadedRegisterTask.status === "canceled") {
-            throw new Error(loadedRegisterTask.error || `register task ${loadedRegisterTask.id} ${loadedRegisterTask.status}`);
-        }
-        const registerTask = loadedRegisterTask.status === "success"
-            ? loadedRegisterTask
-            : await waitForRegisterTask(workflow.registerTaskId, workflow);
-        const account = await syncTaskToAccountLedger(registerTask, "WORKFLOW_REGISTER_DONE");
-        workflow.accountId = account?.id ?? workflow.accountId;
-        recoverWorkflowTokenFromRegisterTask(workflow, registerTask);
-        if (!workflow.tokenHash) throw new Error("register task succeeded but no access token hash was captured");
-        workflowLog(workflow, `register_success phone=${workflow.phone || ""} token=${workflow.tokenHash.slice(0, 12)}`);
-
-        if (workflow.plusEnabled) {
-            workflow.step = "plus";
-            if (!workflow.plusJobLocalId) {
-                if (!workflow.paypalPhone) throw new Error("paypalPhone is required when plus=true");
-                workflowLog(workflow, "create plus job");
-                const job = await createPlusJob({
-                    tokenHash: workflow.tokenHash,
-                    paypalPhone: workflow.paypalPhone,
-                    removeTokenOnSuccess: workflow.options.removeTokenOnPlusSuccess,
-                    accountId: workflow.accountId,
-                    workflowRunId: workflow.runId,
-                });
-                workflow.plusJobLocalId = job.localId;
-                saveWorkflowsLater();
-            }
-            const plusResult = await waitForPlusJob(workflow.plusJobLocalId, workflow);
-            if (plusResult === "awaiting_plus_otp") {
-                workflow.status = "awaiting_plus_otp";
-                workflowLog(workflow, "plus job is waiting for OTP");
-                saveWorkflowsLater();
-                await accountLedger.appendEvent({
-                    type: "WORKFLOW_AWAITING_PLUS_OTP",
-                    accountId: workflow.accountId ?? "",
-                    source: "workflow",
-                    sourceId: workflow.runId,
-                    payload: {plusJobLocalId: workflow.plusJobLocalId},
-                });
-                return;
-            }
-            await syncPlusJobToAccountLedger(plusResult, "WORKFLOW_PLUS_DONE");
-            if (!isPlusJobSuccess(plusResult)) {
-                throw new Error(plusResult.errorMessage || plusResult.error || `plus job ${plusResult.status}`);
-            }
-            workflowLog(workflow, `plus success job=${plusResult.localId}`);
-        }
-
-        workflow.step = "oa";
-        if (!workflow.oaTaskId) {
-            workflowLog(workflow, `oa_reserved target=${workflow.target}`);
-            const [oaTask] = await createOaSub2ApiTasks({
-                count: 1,
-                concurrency: workflow.options.oaConcurrency,
-                target: workflow.target,
-                tokenHashes: [workflow.tokenHash],
-                removeTokenOnSuccess: workflow.options.removeTokenOnOaSuccess,
-                accountId: workflow.accountId,
-                workflowRunId: workflow.runId,
-                workflowStep: "oa",
-                batchId: workflow.batchId,
-                flowMode: workflow.freeMode ? "free" : "phone-plus-oa",
-                emails: workflow.bindEmail ? [workflow.bindEmail] : undefined,
-                password: workflow.options.password,
-                oaProxyUrl: workflow.options.oaProxyUrl,
-                sub2apiGroup: workflow.options.sub2apiGroup,
-                tokenOut: workflow.options.tokenOut,
-            }) as RuntimeRegisterTask[];
-            workflow.oaTaskId = oaTask.id;
-            workflow.bindEmail = oaTask.bindEmail;
-            saveWorkflowsLater();
-        }
-
-        const oaTask = await waitForRegisterTask(workflow.oaTaskId, workflow);
-        await finalizeWorkflowOaSuccess(workflow, oaTask);
-        workflow.step = "done";
-        workflow.status = "success";
-        workflow.finishedAt = nowIso();
-        workflowLog(workflow, `workflow success email=${workflow.bindEmail || ""}`);
-        await accountLedger.appendEvent({
-            type: "WORKFLOW_SUCCESS",
-            accountId: workflow.accountId ?? "",
-            source: "workflow",
-            sourceId: workflow.runId,
-            payload: {
-                phone: workflow.phone,
-                tokenHash: workflow.tokenHash,
-                bindEmail: workflow.bindEmail,
-                target: workflow.target,
-                sub2apiAccount: workflow.sub2apiAccount,
-                cpaAccount: workflow.cpaAccount,
-            },
-        });
-    } catch (error) {
-        workflow.status = "failed";
-        workflow.error = error instanceof Error ? error.message : String(error);
-        workflow.finishedAt = nowIso();
-        workflowLog(workflow, `workflow failed: ${workflow.error}`);
-        const reservationStatus: OaEmailBindStatus = workflow.registerTaskId && !workflow.oaTaskId ? "canceled" : "failed";
-        await releaseWorkflowEmailReservation(workflow, reservationStatus, workflow.error);
-        if (workflow.accountId) {
-            await accountLedger.appendEvent({
-                type: "WORKFLOW_FAILED",
-                accountId: workflow.accountId,
-                source: "workflow",
-                sourceId: workflow.runId,
-                payload: {error: workflow.error, step: workflow.step},
-            });
-        }
-    } finally {
-        workflows.set(workflow.runId, workflow);
-        saveWorkflowsLater();
-        runningWorkflows.delete(runId);
-        maybeReplenishFreeAutoBatch(workflow.batchId);
-    }
-}
-
-async function createPhonePlusOaWorkflow(body: Record<string, unknown>): Promise<WorkflowRecord> {
-    const freeMode = body.freeMode === true || String(body.mode ?? "").trim().toLowerCase() === "free";
-    const plusEnabled = freeMode ? false : body.plus !== false && body.plusEnabled !== false;
-    const paypalPhone = String(body.paypalPhone ?? body.paypal ?? "").trim();
-    if (plusEnabled && !paypalPhone) {
-        throw new Error("paypalPhone is required for phone -> plus -> OA workflow");
-    }
-    const now = nowIso();
-    const workflow: WorkflowRecord = {
-        runId: `wf_${Date.now()}_${randomUUID().slice(0, 8)}`,
-        batchId: String(body.batchId ?? "").trim() || undefined,
-        mode: freeMode ? "free" : "phone-plus-oa",
-        status: "queued",
-        step: "register",
-        target: normalizeOaTarget(body.target ?? body.oaTarget, "sub2api"),
-        freeMode,
-        plusEnabled,
-        paypalPhone,
-        accountId: String(body.accountId ?? "").trim() || undefined,
-        bindEmail: String(body.bindEmail ?? body.email ?? "").trim().toLowerCase() || undefined,
-        createdAt: now,
-        updatedAt: now,
-        options: {
-            registerConcurrency: safeNumber(body.registerConcurrency ?? body.concurrency, 1, 1, 10),
-            oaConcurrency: safeNumber(body.oaConcurrency ?? body.concurrency, 1, 1, 10),
-            removeTokenOnPlusSuccess: body.removeTokenOnPlusSuccess === true,
-            removeTokenOnOaSuccess: body.removeTokenOnOaSuccess === true || body.removeTokenOnSuccess === true,
-            tokenOut: String(body.tokenOut ?? "").trim() || undefined,
-            password: String(body.password ?? "").trim() || undefined,
-            oaProxyUrl: String(body.oaProxyUrl ?? body.openaiProxyUrl ?? body.proxyUrl ?? "").trim() || undefined,
-            sub2apiGroup: String(body.sub2apiGroup ?? "").trim() || undefined,
-            sentinelBrowserProxy: String(body.sentinelBrowserProxy ?? "").trim() || undefined,
-            sentinelBrowserPath: String(body.sentinelBrowserPath ?? "").trim() || undefined,
-            mode: String(body.mode ?? "").trim() || undefined,
-        },
-        logs: [],
-    };
-    workflowLog(workflow, `queued mode=${workflow.mode} target=${workflow.target} plus=${workflow.plusEnabled}`);
-    workflows.set(workflow.runId, workflow);
-    await saveWorkflows();
-    if (body.start !== false) {
-        void runPhonePlusOaWorkflow(workflow.runId);
-    }
-    return workflow;
-}
-
-async function createFreeWorkflows(body: Record<string, unknown>): Promise<{batchId: string; workflows: WorkflowRecord[]; availableEmails: number}> {
-    const {batchId, workflowsCreated, availableEmails} = await withOaTaskCreateLock(async () => {
-        const count = safeNumber(body.count, 1, 1, 100);
-        const batchId = String(body.batchId ?? "").trim() || makeBatchId();
-        const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
-        if (availableEmails < count) {
-            throw new Error(`available OA emails not enough: need ${count}, got ${availableEmails}`);
-        }
-        const workflowsCreated: WorkflowRecord[] = [];
-        for (let index = 0; index < count; index += 1) {
-            const workflow = await createPhonePlusOaWorkflow({
-                ...body,
-                batchId,
-                target: "sub2api",
-                plus: false,
-                plusEnabled: false,
-                freeMode: true,
-                mode: "free",
-                start: false,
-            });
-            await reserveWorkflowEmailLocked(workflow);
-            workflowsCreated.push(workflow);
-        }
-        await saveWorkflows();
-        return {batchId, workflowsCreated, availableEmails};
-    });
-    for (const workflow of workflowsCreated) {
-        void runPhonePlusOaWorkflow(workflow.runId);
-    }
-    return {batchId, workflows: workflowsCreated.map(publicWorkflow), availableEmails};
-}
-
-function freeAutoLog(batch: FreeAutoBatchRecord, message: string): void {
-    batch.logs.push(`[${new Date().toLocaleString()}] ${message}`);
-    if (batch.logs.length > 300) batch.logs.splice(0, batch.logs.length - 300);
-    batch.updatedAt = nowIso();
-}
-
-function getFreeAutoBatchWorkflows(batchId: string): WorkflowRecord[] {
-    return Array.from(workflows.values())
-        .filter((workflow) => workflow.freeMode && workflow.batchId === batchId)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-}
-
-function isActiveWorkflowStatus(status: WorkflowStatus): boolean {
-    return status === "queued" || status === "running" || status === "awaiting_plus_otp";
-}
-
-function refreshFreeAutoBatchCounts(batch: FreeAutoBatchRecord): void {
-    const batchWorkflows = getFreeAutoBatchWorkflows(batch.batchId);
-    batch.createdAttempts = batchWorkflows.length;
-    batch.successCount = batchWorkflows.filter((workflow) => workflow.status === "success").length;
-    batch.activeCount = batchWorkflows.filter((workflow) => isActiveWorkflowStatus(workflow.status)).length;
-    batch.failedCount = batchWorkflows.filter((workflow) => workflow.status === "failed").length;
-    batch.canceledCount = batchWorkflows.filter((workflow) => workflow.status === "canceled").length;
-
-    if (batch.status === "running" && batch.successCount >= batch.targetSuccess) {
-        batch.status = "success";
-        batch.error = undefined;
-        batch.finishedAt = nowIso();
-        freeAutoLog(batch, `target reached: success=${batch.successCount}/${batch.targetSuccess}`);
-    } else if (batch.status === "running" && batch.createdAttempts >= batch.maxAttempts && batch.activeCount === 0) {
-        batch.status = "failed";
-        batch.error = `max attempts reached: success=${batch.successCount}/${batch.targetSuccess}, attempts=${batch.createdAttempts}/${batch.maxAttempts}`;
-        batch.finishedAt = nowIso();
-        freeAutoLog(batch, batch.error);
-    } else {
-        batch.updatedAt = nowIso();
-    }
-}
-
-function publicFreeAutoBatch(batch: FreeAutoBatchRecord): FreeAutoBatchRecord {
-    refreshFreeAutoBatchCounts(batch);
-    return {...batch, logs: batch.logs.slice(-200)};
-}
-
-async function replenishFreeAutoBatch(batchId: string): Promise<FreeAutoBatchRecord | undefined> {
-    const workflowRunIdsToStart: string[] = [];
-    const batch = await withOaTaskCreateLock(async () => {
-        const record = freeAutoBatches.get(batchId);
-        if (!record) return undefined;
-
-        for (const workflow of getFreeAutoBatchWorkflows(batchId)) {
-            if (isActiveWorkflowStatus(workflow.status)) {
-                workflowRunIdsToStart.push(workflow.runId);
-            }
-        }
-
-        refreshFreeAutoBatchCounts(record);
-        if (record.status !== "running") {
-            await saveFreeAutoBatches();
-            return record;
-        }
-
-        const remainingSuccess = Math.max(0, record.targetSuccess - record.successCount);
-        const desiredActive = Math.min(record.initialCount, remainingSuccess);
-        const remainingAttempts = Math.max(0, record.maxAttempts - record.createdAttempts);
-        const countToCreate = Math.max(0, Math.min(desiredActive - record.activeCount, remainingAttempts));
-        if (!countToCreate) {
-            await saveFreeAutoBatches();
-            return record;
-        }
-
-        const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
-        const createCount = Math.min(countToCreate, availableEmails);
-        if (!createCount) {
-            record.error = `available OA emails not enough for free auto replenish: need ${countToCreate}, got ${availableEmails}`;
-            freeAutoLog(record, record.error);
-            if (record.activeCount === 0) {
-                record.status = "failed";
-                record.finishedAt = nowIso();
-            }
-            await saveFreeAutoBatches();
-            return record;
-        }
-
-        const created: WorkflowRecord[] = [];
-        for (let index = 0; index < createCount; index += 1) {
-            const workflow = await createPhonePlusOaWorkflow({
-                batchId: record.batchId,
-                target: record.options.target,
-                plus: false,
-                plusEnabled: false,
-                freeMode: true,
-                mode: "free",
-                start: false,
-                registerConcurrency: record.registerConcurrency,
-                oaConcurrency: record.oaConcurrency,
-                removeTokenOnOaSuccess: record.options.removeTokenOnOaSuccess,
-                removeTokenOnSuccess: record.options.removeTokenOnOaSuccess,
-                tokenOut: record.options.tokenOut,
-                password: record.options.password,
-                oaProxyUrl: record.options.oaProxyUrl,
-                sub2apiGroup: record.options.sub2apiGroup,
-                sentinelBrowserProxy: record.options.sentinelBrowserProxy,
-                sentinelBrowserPath: record.options.sentinelBrowserPath,
-            });
-            await reserveWorkflowEmailLocked(workflow);
-            created.push(workflow);
-            workflowRunIdsToStart.push(workflow.runId);
-        }
-
-        refreshFreeAutoBatchCounts(record);
-        freeAutoLog(record, `replenish created=${created.length} active=${record.activeCount} success=${record.successCount}/${record.targetSuccess} attempts=${record.createdAttempts}/${record.maxAttempts}`);
-        await saveWorkflows();
-        await saveFreeAutoBatches();
-        return record;
-    });
-
-    for (const runId of Array.from(new Set(workflowRunIdsToStart))) {
-        void runPhonePlusOaWorkflow(runId);
-    }
-    return batch;
-}
-
-function maybeReplenishFreeAutoBatch(batchId: string | undefined): void {
-    if (!batchId || !freeAutoBatches.has(batchId)) return;
-    const next = freeAutoReplenishQueue
-        .catch(() => undefined)
-        .then(() => replenishFreeAutoBatch(batchId));
-    freeAutoReplenishQueue = next.then(
-        () => undefined,
-        (error) => {
-            console.error(`free auto replenish failed: ${error instanceof Error ? error.message : String(error)}`);
-        },
-    );
-}
-
-async function createFreeAutoBatch(body: Record<string, unknown>): Promise<{batch: FreeAutoBatchRecord; workflows: WorkflowRecord[]; availableEmails: number}> {
-    const targetSuccess = safeNumber(body.targetSuccess, 10, 1, 100);
-    const maxAttempts = safeNumber(body.maxAttempts, Math.max(targetSuccess * 2, targetSuccess), targetSuccess, 300);
-    const initialCount = safeNumber(body.count ?? body.initialCount, Math.min(targetSuccess, maxAttempts), 1, Math.min(100, maxAttempts));
-    const registerConcurrency = safeNumber(body.registerConcurrency ?? body.concurrency, initialCount, 1, 10);
-    const oaConcurrency = safeNumber(body.oaConcurrency ?? body.concurrency, registerConcurrency, 1, 10);
-    const batchId = String(body.batchId ?? "").trim() || makeBatchId("free_auto");
-    if (freeAutoBatches.has(batchId)) {
-        throw new Error(`free auto batch already exists: ${batchId}`);
-    }
-
-    const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
-    const firstWave = Math.min(initialCount, targetSuccess, maxAttempts);
-    if (availableEmails < firstWave) {
-        throw new Error(`available OA emails not enough: need ${firstWave}, got ${availableEmails}`);
-    }
-
-    const now = nowIso();
-    const batch: FreeAutoBatchRecord = {
-        batchId,
-        status: "running",
-        targetSuccess,
-        maxAttempts,
-        initialCount,
-        registerConcurrency,
-        oaConcurrency,
-        createdAttempts: 0,
-        successCount: 0,
-        activeCount: 0,
-        failedCount: 0,
-        canceledCount: 0,
-        createdAt: now,
-        updatedAt: now,
-        options: {
-            target: "sub2api",
-            tokenOut: String(body.tokenOut ?? "").trim() || undefined,
-            password: String(body.password ?? "").trim() || undefined,
-            oaProxyUrl: String(body.oaProxyUrl ?? body.openaiProxyUrl ?? body.proxyUrl ?? "").trim() || undefined,
-            sub2apiGroup: String(body.sub2apiGroup ?? "").trim() || undefined,
-            sentinelBrowserProxy: String(body.sentinelBrowserProxy ?? "").trim() || undefined,
-            sentinelBrowserPath: String(body.sentinelBrowserPath ?? "").trim() || undefined,
-            removeTokenOnOaSuccess: body.removeTokenOnOaSuccess === true || body.removeTokenOnSuccess === true,
-        },
-        logs: [],
-    };
-    freeAutoLog(batch, `created target=${targetSuccess} maxAttempts=${maxAttempts} window=${initialCount} registerConcurrency=${registerConcurrency} oaConcurrency=${oaConcurrency}`);
-    freeAutoBatches.set(batchId, batch);
-    await saveFreeAutoBatches();
-    await replenishFreeAutoBatch(batchId);
-    return {
-        batch: publicFreeAutoBatch(batch),
-        workflows: getFreeAutoBatchWorkflows(batchId).map(publicWorkflow),
-        availableEmails,
-    };
-}
-
-async function reconcileAccountLedger(): Promise<Record<string, unknown>> {
-    let tasks = 0;
-    let plus = 0;
-    let tokens = 0;
-    let emailStatuses = 0;
-    for (const task of Array.from(registerTasks.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-        const account = await accountLedger.upsertFromTask(task, {eventType: "RECONCILE_TASK", emitEvent: false});
-        if (account && task.accountId !== account.id) {
-            task.accountId = account.id;
-            tasks += 1;
-        }
-    }
-    const tokenFile = getPpxyConfig().tokenFile;
-    for (const token of await readTokenPool()) {
-        await syncTokenToAccountLedger(token, tokenFile);
-        tokens += 1;
-    }
-    for (const job of Array.from(plusJobs.values()).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-        const account = await accountLedger.upsertFromPlusJob(job, {eventType: "RECONCILE_PLUS", emitEvent: false});
-        if (account && job.accountId !== account.id) {
-            job.accountId = account.id;
-            plus += 1;
-        }
-    }
-    for (const status of Object.values(oaEmailStatus.emails)) {
-        const account = await syncOaEmailStatusToAccountLedger(status, "RECONCILE_OA_EMAIL_STATUS");
-        if (account) emailStatuses += 1;
-    }
-    if (tasks) saveRegisterTasksLater();
-    if (plus) savePlusJobsLater();
-    await accountLedger.save();
-    return {
-        linkedTasks: tasks,
-        linkedPlusJobs: plus,
-        scannedTokens: tokens,
-        scannedEmailStatuses: emailStatuses,
-        summary: await accountLedger.summary(),
-    };
 }
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -3763,60 +2500,6 @@ async function readAgentDoc(filePath: string): Promise<{path: string; content: s
     };
 }
 
-async function getSystemSummary(): Promise<Record<string, unknown>> {
-    const tokens = await readTokenPool();
-    const atItems = tokens.map(tokenInfo);
-    const oaEmails = await readOaEmailPool();
-    const accountSummary = await accountLedger.summary();
-    const registerOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "register");
-    const oaOnly = Array.from(registerTasks.values()).filter((task) => task.kind === "oa-sub2api");
-    const registerStatuses = groupCounts(registerOnly.map((task) => task.status));
-    const oaStatuses = groupCounts(oaOnly.map((task) => task.status));
-    const plusStatuses = groupCounts(Array.from(plusJobs.values()).map((job) => String(job.status || "unknown")));
-    const todayPrefix = new Date().toISOString().slice(0, 10);
-    return {
-        register: {
-            running: registerStatuses.running ?? 0,
-            queued: registerStatuses.queued ?? 0,
-            success: registerStatuses.success ?? 0,
-            failed: registerStatuses.failed ?? 0,
-            successToday: registerOnly.filter((task) => task.status === "success" && task.finishedAt?.startsWith(todayPrefix)).length,
-            failedToday: registerOnly.filter((task) => task.status === "failed" && task.finishedAt?.startsWith(todayPrefix)).length,
-            lastBatch: getRegisterBatchSummaries()[0] ?? null,
-        },
-        at: {
-            total: atItems.length,
-            withPhone: atItems.filter((item) => Boolean(item.phone)).length,
-            expired: atItems.filter((item) => item.expired === true).length,
-            trialEligible: atItems.filter((item) => (item.trial as TrialResult | undefined)?.eligible === true).length,
-            usableForOA: atItems.filter((item) => (item.quality as Record<string, unknown> | undefined)?.usableForOA === true).length,
-            usableForPlus: atItems.filter((item) => (item.quality as Record<string, unknown> | undefined)?.usableForPlus === true).length,
-        },
-        oa: {
-            running: oaStatuses.running ?? 0,
-            queued: oaStatuses.queued ?? 0,
-            success: oaStatuses.success ?? 0,
-            failed: oaStatuses.failed ?? 0,
-            availableEmails: oaEmails.filter((item) => item.available).length,
-            boundToday: oaEmails.filter((item) => item.bindStatus === "bound" && item.bindUpdatedAt?.startsWith(todayPrefix)).length,
-        },
-        plus: {
-            total: plusJobs.size,
-            statuses: plusStatuses,
-            running: Array.from(plusJobs.values()).filter((job) => !job.done && job.status !== "failed" && job.status !== "success").length,
-            otpPending: Array.from(plusJobs.values()).filter((job) => job.otpPending || job.status === "otp_pending").length,
-            successToday: Array.from(plusJobs.values()).filter((job) => job.status === "success" && job.updatedAt?.startsWith(todayPrefix)).length,
-        },
-        accounts: accountSummary,
-        workflows: {
-            total: workflows.size,
-            statuses: groupCounts(Array.from(workflows.values()).map((workflow) => workflow.status)),
-            running: Array.from(workflows.values()).filter((workflow) => workflow.status === "running").length,
-            awaitingPlusOtp: Array.from(workflows.values()).filter((workflow) => workflow.status === "awaiting_plus_otp").length,
-        },
-    };
-}
-
 async function sendAgentDocs(res: ServerResponse): Promise<void> {
     const [quick, full] = await Promise.all([
         readAgentDoc(agentQuickDocFile),
@@ -3847,14 +2530,12 @@ async function sendAgentDocs(res: ServerResponse): Promise<void> {
 async function serveStatic(url: URL, res: ServerResponse): Promise<boolean> {
     const routes: Record<string, string> = {
         "/": "index.html",
-        "/accounts": "accounts.html",
         "/register": "register.html",
         "/plus": "plus.html",
         "/oa": "oa.html",
         "/styles.css": "styles.css",
         "/theme.js": "theme.js",
         "/agent.js": "agent.js",
-        "/accounts.js": "accounts.js",
         "/register.js": "register.js",
         "/plus.js": "plus.js",
         "/oa.js": "oa.js",
@@ -3875,35 +2556,7 @@ async function serveStatic(url: URL, res: ServerResponse): Promise<boolean> {
 
 function publicTask(task: RuntimeRegisterTask): RegisterTask {
     const {child: _child, env: _env, ...plain} = task;
-    const workflow = task.workflowRunId ? workflows.get(task.workflowRunId) : undefined;
-    const relatedOaTask = task.kind === "register" && workflow?.oaTaskId
-        ? registerTasks.get(workflow.oaTaskId)
-        : undefined;
-    const inferredFlowMode = plain.flowMode
-        ?? (workflow?.freeMode ? "free" : workflow ? "phone-plus-oa" : task.kind === "oa-sub2api" ? "oa-only" : "phone-register");
-    const flowLabel = inferredFlowMode === "free"
-        ? "完全 free"
-        : inferredFlowMode === "phone-plus-oa"
-            ? "手机号+Plus+OA"
-            : inferredFlowMode === "oa-only"
-                ? "OA 绑定"
-                : "手机号注册";
-    return {
-        ...plain,
-        flowMode: inferredFlowMode,
-        flowLabel,
-        workflowStatus: workflow?.status,
-        workflowMode: workflow?.mode,
-        relatedOaTaskId: relatedOaTask?.id,
-        relatedOaStatus: relatedOaTask?.status,
-        relatedOaEmail: relatedOaTask?.bindEmail ?? workflow?.bindEmail,
-        relatedOaTarget: relatedOaTask?.oaTarget ?? workflow?.target,
-        relatedSub2ApiAccount: relatedOaTask?.sub2apiAccount ?? workflow?.sub2apiAccount,
-        relatedCpaAccount: relatedOaTask?.cpaAccount ?? workflow?.cpaAccount,
-        relatedOaError: relatedOaTask?.error ?? (workflow?.step === "oa" ? workflow.error : undefined),
-        args: redactCliArgs(plain.args),
-        logs: plain.logs.slice(-200),
-    };
+    return {...plain, args: redactCliArgs(plain.args), logs: plain.logs.slice(-200)};
 }
 
 function runningTaskCount(kind?: TaskKind): number {
@@ -3913,121 +2566,11 @@ function runningTaskCount(kind?: TaskKind): number {
         .length;
 }
 
-
-function taskLogsText(task: RuntimeRegisterTask): string {
-    return [...(task.logs ?? []), task.error ?? ""].join("\n").toLowerCase();
-}
-
-function classifyTaskFailure(task: RuntimeRegisterTask): {errorType: string; suggestion: string; retryable: boolean} {
-    const text = taskLogsText(task);
-    if (/429|rate_limit|too many requests|rate limit exceeded/i.test(text)) {
-        return {errorType: "openai_rate_limited", suggestion: "OpenAI authorization is rate limited; lower OA concurrency, wait, or change proxy before retrying.", retryable: true};
-    }
-    if (task.kind === "oa-sub2api" && /authorize|oauth|sub2api|callback|bind_email/i.test(text)) {
-        return {errorType: "oa_flow_error", suggestion: "OA/SUB2API binding failed; inspect OAuth logs, mailbox status, proxy, and SUB2API config.", retryable: true};
-    }
-    if (/no_number|no numbers|no free phones|balance|insufficient/i.test(text)) {
-        return {errorType: "sms_no_number", suggestion: "SMS inventory or balance may be unavailable; switch country/price tier or retry later.", retryable: true};
-    }
-    if (/otp|sms|code|wait_code|status_wait|timeout|timed out/i.test(text)) {
-        return {errorType: "sms_otp_timeout", suggestion: "SMS OTP wait likely timed out; lower concurrency or retry with another tier.", retryable: true};
-    }
-    if (/proxy|econnreset|etimedout|tunnel|socket|connect|net::/i.test(text)) {
-        return {errorType: "proxy_error", suggestion: "Proxy/network looks unstable; check proxy reachability and reduce concurrency.", retryable: true};
-    }
-    if (/browser|chrom|playwright|sentinel|executable|spawn/i.test(text)) {
-        return {errorType: "browser_error", suggestion: "Browser/Sentinel automation failed; check browser path and runtime environment.", retryable: true};
-    }
-    if (/black phone|blocked|rate limit|risk|openai/i.test(text)) {
-        return {errorType: "openai_blocked", suggestion: "OpenAI risk control or number rejection; retry with another number/proxy.", retryable: true};
-    }
-    if (/email_already_in_use|already in use/i.test(text)) {
-        return {errorType: "email_already_in_use", suggestion: "Email is already in use; do not retry this mailbox, use another one.", retryable: false};
-    }
-    return {errorType: "unknown", suggestion: "Inspect the last 50 diagnosis log lines; lower concurrency if retrying.", retryable: true};
-}
-
-function summarizeTaskDiagnosis(task: RuntimeRegisterTask): Record<string, unknown> {
-    const failure = task.status === "failed" ? classifyTaskFailure(task) : undefined;
-    const lastImportantLogs = (task.logs ?? []).slice(-50);
-    return {
-        id: task.id,
-        kind: task.kind,
-        status: task.status,
-        batchId: task.batchId ?? "",
-        title: task.title,
-        phone: task.phone ?? "",
-        stage: task.status === "success" ? "done" : task.status === "running" ? "running" : task.status === "queued" ? "queued" : task.status,
-        error: task.error ?? "",
-        errorType: task.errorType ?? failure?.errorType ?? "",
-        retryable: failure?.retryable ?? task.status === "failed",
-        recommendedAction: task.errorSuggestion ?? failure?.suggestion ?? "",
-        lastImportantLogs,
-    };
-}
-
-function groupCounts<T extends string>(items: T[]): Record<T, number> {
-    return items.reduce((acc, item) => {
-        acc[item] = (acc[item] ?? 0) + 1;
-        return acc;
-    }, {} as Record<T, number>);
-}
-
-function getRegisterBatchSummaries(): Array<Record<string, unknown>> {
-    const batches = new Map<string, RuntimeRegisterTask[]>();
-    for (const task of registerTasks.values()) {
-        if (task.kind !== "register") continue;
-        const batchId = task.batchId || "legacy";
-        const list = batches.get(batchId) ?? [];
-        list.push(task);
-        batches.set(batchId, list);
-    }
-    return Array.from(batches.entries()).map(([batchId, tasks]) => {
-        const sorted = [...tasks].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-        const statuses = groupCounts(tasks.map((task) => task.status));
-        const first = sorted[0];
-        const last = sorted[sorted.length - 1];
-        const targetSuccess = Math.max(...tasks.map((task) => task.autoTargetSuccess ?? 0), 0);
-        const maxAttempts = Math.max(...tasks.map((task) => task.autoMaxAttempts ?? 0), 0);
-        const done = (statuses.running ?? 0) === 0 && (statuses.queued ?? 0) === 0;
-        return {
-            batchId,
-            count: tasks.length,
-            statuses,
-            success: statuses.success ?? 0,
-            failed: statuses.failed ?? 0,
-            running: statuses.running ?? 0,
-            queued: statuses.queued ?? 0,
-            canceled: statuses.canceled ?? 0,
-            targetSuccess: targetSuccess || undefined,
-            maxAttempts: maxAttempts || undefined,
-            targetReached: targetSuccess ? (statuses.success ?? 0) >= targetSuccess : undefined,
-            done,
-            createdAt: first?.createdAt ?? "",
-            updatedAt: last?.updatedAt ?? "",
-        };
-    }).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-}
-
-function getRegisterBatchSummary(batchId: string): Record<string, unknown> | undefined {
-    return getRegisterBatchSummaries().find((batch) => batch.batchId === batchId);
-}
-
-async function deleteRegisterTasksByStatus(
-    statuses: Set<TaskStatus>,
-    options: {batchId?: string; olderThanMinutes?: number; dryRun?: boolean} = {},
-): Promise<Record<string, unknown>> {
-    const cutoff = options.olderThanMinutes && options.olderThanMinutes > 0
-        ? Date.now() - options.olderThanMinutes * 60_000
-        : 0;
+async function deleteRegisterTasksByStatus(statuses: Set<TaskStatus>): Promise<Record<string, unknown>> {
     const targets = Array.from(registerTasks.values())
         .filter((task) => task.kind === "register")
         .filter((task) => statuses.has(task.status))
-        .filter((task) => task.status !== "running")
-        .filter((task) => !options.batchId || task.batchId === options.batchId)
-        .filter((task) => !cutoff || Date.parse(task.updatedAt || task.createdAt) <= cutoff);
-    const ids = targets.map((task) => task.id);
-    if (options.dryRun) return {deleted: 0, matched: ids.length, dryRun: true, ids};
+        .filter((task) => task.status !== "running");
     const deleted: string[] = [];
     for (const task of targets) {
         registerQueue = registerQueue.filter((item) => item.id !== task.id);
@@ -4040,7 +2583,7 @@ async function deleteRegisterTasksByStatus(
         deleted.push(task.id);
     }
     if (deleted.length) saveRegisterTasksLater();
-    return {deleted: deleted.length, matched: ids.length, ids: deleted};
+    return {deleted: deleted.length, ids: deleted};
 }
 
 async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): Promise<void> {
@@ -4073,9 +2616,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
                 registerTasks: registerTasks.size,
                 plusJobs: plusJobs.size,
                 registerRunning: runningTaskCount("register"),
-                registerQueued: registerQueue.filter((task) => task.kind === "register").length,
-                oaRunning: runningTaskCount("oa-sub2api"),
-                oaQueued: registerQueue.filter((task) => task.kind === "oa-sub2api").length,
+                registerQueued: registerQueue.length,
             },
             config: getConfigSummary(),
         });
@@ -4085,201 +2626,6 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (method === "GET" && pathname === "/api/config") {
         sendJson(res, 200, getConfigSummary());
         return;
-    }
-
-    if (method === "GET" && pathname === "/api/summary") {
-        sendJson(res, 200, await getSystemSummary());
-        return;
-    }
-
-    if (method === "GET" && pathname === "/api/accounts") {
-        sendJson(res, 200, {
-            summary: await accountLedger.summary(),
-            accounts: await accountLedger.list(),
-        });
-        return;
-    }
-
-    const accountLookupMatch = pathname.match(/^\/api\/accounts\/(by-token|by-phone|by-email)\/(.+)$/);
-    if (accountLookupMatch && method === "GET") {
-        const mode = accountLookupMatch[1];
-        const value = decodeURIComponent(accountLookupMatch[2]);
-        const account = await accountLedger.find({
-            tokenHash: mode === "by-token" ? value : undefined,
-            phone: mode === "by-phone" ? value : undefined,
-            email: mode === "by-email" ? value : undefined,
-        });
-        if (!account) {
-            sendJson(res, 404, {error: "account not found"});
-            return;
-        }
-        sendJson(res, 200, {account});
-        return;
-    }
-
-    const accountMatch = pathname.match(/^\/api\/accounts\/([^/]+)$/);
-    if (accountMatch && method === "GET") {
-        const account = await accountLedger.get(decodeURIComponent(accountMatch[1]));
-        if (!account) {
-            sendJson(res, 404, {error: "account not found"});
-            return;
-        }
-        sendJson(res, 200, {account});
-        return;
-    }
-
-    if (method === "POST" && pathname === "/api/reconcile") {
-        sendJson(res, 200, await reconcileAccountLedger());
-        return;
-    }
-
-    if (method === "GET" && pathname === "/api/workflows") {
-        sendJson(res, 200, {
-            workflows: Array.from(workflows.values()).map(publicWorkflow).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-        });
-        return;
-    }
-
-    if (method === "GET" && pathname === "/api/workflows/free-auto") {
-        sendJson(res, 200, {
-            batches: Array.from(freeAutoBatches.values())
-                .map(publicFreeAutoBatch)
-                .sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-        });
-        return;
-    }
-
-    if (method === "POST" && pathname === "/api/workflows/free-auto") {
-        try {
-            const body = await readJsonBody(req);
-            const result = await createFreeAutoBatch(body);
-            sendJson(res, 201, {
-                batch: result.batch,
-                batchId: result.batch.batchId,
-                availableEmails: result.availableEmails,
-                workflows: result.workflows.map(publicWorkflow),
-            });
-        } catch (error) {
-            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
-        }
-        return;
-    }
-
-    const freeAutoBatchMatch = pathname.match(/^\/api\/workflows\/free-auto\/([^/]+)(?:\/(resume|cancel))?$/);
-    if (freeAutoBatchMatch) {
-        const batch = freeAutoBatches.get(decodeURIComponent(freeAutoBatchMatch[1]));
-        if (!batch) {
-            sendJson(res, 404, {error: "free auto batch not found"});
-            return;
-        }
-        const action = freeAutoBatchMatch[2] ?? "";
-        if (method === "GET" && !action) {
-            sendJson(res, 200, {
-                batch: publicFreeAutoBatch(batch),
-                workflows: getFreeAutoBatchWorkflows(batch.batchId).map(publicWorkflow).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-            });
-            return;
-        }
-        if (method === "POST" && action === "resume") {
-            if (batch.status === "success") {
-                sendJson(res, 409, {error: "free auto batch is success"});
-                return;
-            }
-            batch.status = "running";
-            batch.finishedAt = undefined;
-            batch.error = undefined;
-            freeAutoLog(batch, "manual resume requested");
-            await saveFreeAutoBatches();
-            maybeReplenishFreeAutoBatch(batch.batchId);
-            sendJson(res, 200, {batch: publicFreeAutoBatch(batch)});
-            return;
-        }
-        if (method === "POST" && action === "cancel") {
-            batch.status = "canceled";
-            batch.finishedAt = nowIso();
-            freeAutoLog(batch, "manual cancel requested");
-            await saveFreeAutoBatches();
-            sendJson(res, 200, {batch: publicFreeAutoBatch(batch)});
-            return;
-        }
-    }
-
-    if (method === "POST" && pathname === "/api/workflows/phone-plus-oa") {
-        try {
-            const body = await readJsonBody(req);
-            sendJson(res, 201, {workflow: publicWorkflow(await createPhonePlusOaWorkflow(body))});
-        } catch (error) {
-            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
-        }
-        return;
-    }
-
-    if (method === "POST" && pathname === "/api/workflows/free") {
-        try {
-            const body = await readJsonBody(req);
-            const result = await createFreeWorkflows(body);
-            sendJson(res, 201, {
-                batchId: result.batchId,
-                availableEmails: result.availableEmails,
-                workflows: result.workflows,
-            });
-        } catch (error) {
-            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
-        }
-        return;
-    }
-
-    const workflowMatch = pathname.match(/^\/api\/workflows\/([^/]+)(?:\/(plus-otp|resume|cancel))?$/);
-    if (workflowMatch) {
-        const workflow = workflows.get(decodeURIComponent(workflowMatch[1]));
-        if (!workflow) {
-            sendJson(res, 404, {error: "workflow not found"});
-            return;
-        }
-        const action = workflowMatch[2] ?? "";
-        if (method === "GET" && !action) {
-            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
-            return;
-        }
-        if (method === "POST" && action === "plus-otp") {
-            try {
-                const body = await readJsonBody(req);
-                if (!workflow.plusJobLocalId) throw new Error("workflow has no plus job");
-                const job = plusJobs.get(workflow.plusJobLocalId);
-                if (!job) throw new Error("plus job not found");
-                const result = await submitPlusOtp(job, String(body.pin || body.otp || ""));
-                workflow.status = "running";
-                workflowLog(workflow, "plus OTP submitted; resume workflow");
-                saveWorkflowsLater();
-                void runPhonePlusOaWorkflow(workflow.runId);
-                sendJson(res, 200, {result, workflow: publicWorkflow(workflow), job});
-            } catch (error) {
-                sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
-            }
-            return;
-        }
-        if (method === "POST" && action === "resume") {
-            if (workflow.status === "success" || workflow.status === "canceled") {
-                sendJson(res, 409, {error: `workflow is ${workflow.status}`});
-                return;
-            }
-            workflow.status = "running";
-            workflow.error = undefined;
-            workflowLog(workflow, "manual resume requested");
-            saveWorkflowsLater();
-            void runPhonePlusOaWorkflow(workflow.runId);
-            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
-            return;
-        }
-        if (method === "POST" && action === "cancel") {
-            workflow.status = "canceled";
-            workflow.finishedAt = nowIso();
-            workflowLog(workflow, "manual cancel requested");
-            await releaseWorkflowEmailReservation(workflow, "canceled", "manual cancel requested");
-            saveWorkflowsLater();
-            sendJson(res, 200, {workflow: publicWorkflow(workflow)});
-            return;
-        }
     }
 
     if (method === "GET" && pathname === "/api/register/password") {
@@ -4309,20 +2655,9 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
-    if (method === "GET" && pathname === "/api/sms/balances") {
-        sendJson(res, 200, await getSmsBalances());
-        return;
-    }
-
     if ((method === "PATCH" || method === "POST") && pathname === "/api/config/sub2api") {
         const body = await readJsonBody(req);
         sendJson(res, 200, await updateSub2ApiConfig(body));
-        return;
-    }
-
-    if ((method === "PATCH" || method === "POST") && pathname === "/api/config/cpa") {
-        const body = await readJsonBody(req);
-        sendJson(res, 200, await updateCpaConfig(body));
         return;
     }
 
@@ -4354,48 +2689,12 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
-    if (method === "GET" && pathname === "/api/register/batches") {
-        sendJson(res, 200, {batches: getRegisterBatchSummaries()});
-        return;
-    }
-
-    const registerBatchMatch = pathname.match(/^\/api\/register\/batches\/([^/]+)$/);
-    if (registerBatchMatch && method === "GET") {
-        const batchId = decodeURIComponent(registerBatchMatch[1]);
-        const batch = getRegisterBatchSummary(batchId);
-        if (!batch) {
-            sendJson(res, 404, {error: "batch not found"});
-            return;
-        }
-        sendJson(res, 200, {
-            batch,
-            tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "register" && task.batchId === batchId).map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-        });
-        return;
-    }
-
-    if (method === "POST" && pathname === "/api/register/auto") {
-        const body = await readJsonBody(req);
-        const targetSuccess = safeNumber(body.targetSuccess, 10, 1, 100);
-        const maxAttempts = safeNumber(body.maxAttempts, Math.max(targetSuccess * 2, targetSuccess), targetSuccess, 300);
-        const initialCount = safeNumber(body.count ?? body.initialCount, Math.min(targetSuccess, maxAttempts), 1, Math.min(100, maxAttempts));
-        const tasks = createRegisterTasks({
-            ...body,
-            count: initialCount,
-            autoTargetSuccess: targetSuccess,
-            autoMaxAttempts: maxAttempts,
-        }).map((task) => publicTask(task as RuntimeRegisterTask));
-        const batchId = tasks[0]?.batchId ?? "";
-        sendJson(res, 201, {batchId, targetSuccess, maxAttempts, tasks});
-        return;
-    }
-
     if (method === "GET" && pathname === "/api/register/tasks") {
         sendJson(res, 200, {
             tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "register").map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
             running: runningTaskCount("register"),
             queued: registerQueue.filter((task) => task.kind === "register").length,
-            concurrency: taskMaxConcurrency.register,
+            concurrency: registerMaxConcurrency,
         });
         return;
     }
@@ -4403,24 +2702,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
     if (method === "POST" && pathname === "/api/register/tasks") {
         const body = await readJsonBody(req);
         const tasks = createRegisterTasks(body).map((task) => publicTask(task as RuntimeRegisterTask));
-        sendJson(res, 201, {batchId: tasks[0]?.batchId ?? "", tasks});
-        return;
-    }
-
-    if (method === "POST" && pathname === "/api/register/tasks/cleanup") {
-        const body = await readJsonBody(req);
-        const rawStatuses = parseStringList(body.status ?? body.statuses ?? "failed");
-        const allowedStatuses: TaskStatus[] = ["queued", "failed", "canceled"];
-        const statuses = new Set<TaskStatus>(rawStatuses.filter((item): item is TaskStatus => allowedStatuses.includes(item as TaskStatus)));
-        if (!statuses.size) {
-            sendJson(res, 400, {error: "no deletable statuses selected"});
-            return;
-        }
-        sendJson(res, 200, await deleteRegisterTasksByStatus(statuses, {
-            batchId: String(body.batchId ?? "").trim() || undefined,
-            olderThanMinutes: body.olderThanMinutes == null ? undefined : Number(body.olderThanMinutes),
-            dryRun: body.dryRun === true,
-        }));
+        sendJson(res, 201, {tasks});
         return;
     }
 
@@ -4493,7 +2775,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
             tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "oa-sub2api").map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
             running: runningTaskCount("oa-sub2api"),
             queued: registerQueue.filter((task) => task.kind === "oa-sub2api").length,
-            concurrency: taskMaxConcurrency["oa-sub2api"],
+            concurrency: registerMaxConcurrency,
         });
         return;
     }
@@ -4513,7 +2795,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
-    const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel|diagnosis|retry))?$/);
+    const taskMatch = pathname.match(/^\/api\/tasks\/([^/]+)(?:\/(cancel))?$/);
     if (taskMatch) {
         const task = registerTasks.get(decodeURIComponent(taskMatch[1]));
         if (!task) {
@@ -4523,20 +2805,6 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         if (method === "POST" && taskMatch[2] === "cancel") {
             cancelRegisterTask(task);
             sendJson(res, 200, {task: publicTask(task)});
-            return;
-        }
-        if (method === "POST" && taskMatch[2] === "retry") {
-            try {
-                const body = await readJsonBody(req);
-                const retryTask = await retryOaTask(task, body);
-                sendJson(res, 201, {task: publicTask(retryTask), sourceTask: publicTask(task)});
-            } catch (error) {
-                sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
-            }
-            return;
-        }
-        if (method === "GET" && taskMatch[2] === "diagnosis") {
-            sendJson(res, 200, {diagnosis: summarizeTaskDiagnosis(task)});
             return;
         }
         if (method === "GET" && !taskMatch[2]) {
@@ -4702,11 +2970,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
 async function main(): Promise<void> {
     await loadStores();
-    for (const batch of freeAutoBatches.values()) {
-        if (batch.status === "running") {
-            maybeReplenishFreeAutoBatch(batch.batchId);
-        }
-    }
     const preferredPort = safeNumber(process.env.PORT, 8787, 1, 65535);
     const host = process.env.HOST || "127.0.0.1";
     const server = http.createServer((req, res) => {

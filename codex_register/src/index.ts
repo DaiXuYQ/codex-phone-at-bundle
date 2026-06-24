@@ -1,6 +1,7 @@
 import {appConfig} from "./config.js";
 import {generateRandomDeviceProfile} from "./device-profile.js";
 import {MAILBOX_CONFIG} from "./mailbox.js";
+import {MailboxUrlCodeProvider, type MailboxSnapshot} from "./mailbox-url.js";
 import {OpenAIClient} from "./openai.js";
 import {closeSentinelBrowser} from "./sentinel-browser.js";
 import type {ISMSActivationBroker} from "./sms/activation-broker.js";
@@ -25,6 +26,15 @@ function readNumberArg(flag: string): number | null {
     }
     const value = Number.parseInt(raw, 10);
     return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+async function writeTempHotmailTokenFile(raw: string): Promise<string> {
+    const {mkdir, writeFile} = await import("node:fs/promises");
+    const path = await import("node:path");
+    const filePath = path.resolve(process.cwd(), ".web-data", `register-hotmail-${process.pid}-${Date.now()}.txt`);
+    await mkdir(path.dirname(filePath), {recursive: true});
+    await writeFile(filePath, `${raw.trim()}\n`, "utf8");
+    return filePath;
 }
 
 type RejectedPhoneRecord = {
@@ -628,22 +638,48 @@ async function runOnce(): Promise<void> {
         // 这样能在 chatgpt.com 建立完整的 session cookies。
         console.log(`[phone-signup] 切换到 ChatGPT web 登录拿 accessToken...`);
 
-        // 如果触发 add-email，用 hotmail 卡密的邮箱绑定 + IMAP 接 OTP
-        let bindEmail = "";
+        // free workflow 会通过参数传入预留邮箱；普通注册才 fallback 到旧 Hotmail 池。
+        let bindEmail = readArgValue("--bind-email").trim();
+        const bindMailboxUrl = readArgValue("--mailbox-url").trim();
+        const bindEmailRaw = readArgValue("--email-raw").trim();
         let fetchAddEmailOtp: (() => Promise<string>) | undefined = undefined;
         try {
-            const {createHotmailProvider} = await import("./mail/hotmail.js");
-            const hotmailProvider = createHotmailProvider();
-            bindEmail = await hotmailProvider.getEmailAddress();
-            console.log(`[phone-signup] add-email 候选邮箱: ${bindEmail}`);
-            // 记录 fetch 调用时刻作为最低时间戳，避免读到旧邮件
-            fetchAddEmailOtp = async () => {
-                const startedAt = Date.now();
-                console.log(`[add-email] 等待 IMAP 邮件 OTP for ${bindEmail} (after=${new Date(startedAt).toISOString()})...`);
-                return await (hotmailProvider as any).getEmailVerificationCode(bindEmail, {minTimestampMs: startedAt});
-            };
+            if (bindEmail && bindMailboxUrl) {
+                const mailbox = new MailboxUrlCodeProvider(bindMailboxUrl);
+                let baseline: MailboxSnapshot | null = null;
+                try {
+                    baseline = await mailbox.snapshot();
+                    console.log(`[phone-signup] add-email 预留邮箱: ${bindEmail} mailbox baseline=${baseline.code ? "code" : "empty"}`);
+                } catch (error) {
+                    console.warn(`[phone-signup] add-email mailbox baseline failed: ${error instanceof Error ? error.message : String(error)}`);
+                }
+                fetchAddEmailOtp = async () => {
+                    console.log(`[add-email] 等待 mailbox-url 邮件 OTP for ${bindEmail}...`);
+                    return await new MailboxUrlCodeProvider(bindMailboxUrl).waitForCode({baseline, timeoutMs: 120000, intervalMs: 3000});
+                };
+            } else if (bindEmail && bindEmailRaw) {
+                process.env.HOTMAIL_TOKENS_FILE = await writeTempHotmailTokenFile(bindEmailRaw);
+                const {createHotmailProvider} = await import("./mail/hotmail.js");
+                const hotmailProvider = createHotmailProvider();
+                console.log(`[phone-signup] add-email 预留 Hotmail: ${bindEmail}`);
+                fetchAddEmailOtp = async () => {
+                    const startedAt = Date.now();
+                    console.log(`[add-email] 等待 IMAP 邮件 OTP for ${bindEmail} (after=${new Date(startedAt).toISOString()})...`);
+                    return await (hotmailProvider as any).getEmailVerificationCode(bindEmail, {minTimestampMs: startedAt});
+                };
+            } else {
+                const {createHotmailProvider} = await import("./mail/hotmail.js");
+                const hotmailProvider = createHotmailProvider();
+                bindEmail = await hotmailProvider.getEmailAddress();
+                console.log(`[phone-signup] add-email 候选邮箱: ${bindEmail}`);
+                fetchAddEmailOtp = async () => {
+                    const startedAt = Date.now();
+                    console.log(`[add-email] 等待 IMAP 邮件 OTP for ${bindEmail} (after=${new Date(startedAt).toISOString()})...`);
+                    return await (hotmailProvider as any).getEmailVerificationCode(bindEmail, {minTimestampMs: startedAt});
+                };
+            }
         } catch (e) {
-            console.warn(`[phone-signup] hotmail 邮箱准备失败 (无 add-email 兜底): ${(e as Error).message}`);
+            console.warn(`[phone-signup] 邮箱准备失败 (无 add-email 兜底): ${(e as Error).message}`);
         }
 
         const webLoginClient = new OpenAIClient({

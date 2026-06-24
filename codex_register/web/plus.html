@@ -18,6 +18,7 @@
       <nav class="nav">
         <button class="nav-ai" type="button" data-agent-open>AI 接入</button>
         <a href="/">首页</a>
+        <a href="/accounts">账户台账</a>
         <a href="/register">手机号注册</a>
         <a class="active" href="/plus">AT 升级</a>
         <a href="/oa">OA 接入</a>
@@ -113,6 +114,10 @@
             <input id="removeTokenOnSuccess" name="removeTokenOnSuccess" type="checkbox">
             <span>成功后从 AT 池移除</span>
           </label>
+          <div class="form-cache-row">
+            <span id="plus-draft-status" class="muted">常用填写项会自动缓存</span>
+            <button id="clear-plus-draft" class="ghost small" type="button">清空缓存</button>
+          </div>
           <button class="primary wide" type="submit">拿选中 AT 去升级</button>
         </form>
 

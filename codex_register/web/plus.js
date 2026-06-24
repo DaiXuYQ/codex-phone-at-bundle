@@ -5,6 +5,8 @@ let jobs = [];
 let selectedHashes = new Set();
 let selectedJobId = "";
 let checkingHashes = new Set();
+const PLUS_JOB_DRAFT_KEY = "codex-plus-job-form:v1";
+const PLUS_JOB_DRAFT_FIELDS = ["paypalPhone", "clientRef", "smsApi", "proxyJp"];
 
 function toast(message) {
   const el = $("#toast");
@@ -26,6 +28,79 @@ function setCheckProgress(message = "") {
   if (!el) return;
   el.textContent = message;
   el.classList.toggle("hidden", !message);
+}
+
+function readPlusJobDraft() {
+  try {
+    return JSON.parse(localStorage.getItem(PLUS_JOB_DRAFT_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
+
+function savePlusJobDraft() {
+  const draft = {};
+  for (const id of PLUS_JOB_DRAFT_FIELDS) {
+    const input = $(`#${id}`);
+    if (input) draft[id] = input.value;
+  }
+  const removeTokenInput = $("#removeTokenOnSuccess");
+  if (removeTokenInput) draft.removeTokenOnSuccess = removeTokenInput.checked;
+
+  try {
+    localStorage.setItem(PLUS_JOB_DRAFT_KEY, JSON.stringify(draft));
+    setPlusJobDraftStatus("已自动缓存");
+  } catch {
+    // Ignore storage failures, e.g. private browsing or disabled storage.
+  }
+}
+
+function restorePlusJobDraft() {
+  const draft = readPlusJobDraft();
+  let restored = false;
+  for (const id of PLUS_JOB_DRAFT_FIELDS) {
+    const input = $(`#${id}`);
+    if (input && typeof draft[id] === "string") {
+      input.value = draft[id];
+      restored = true;
+    }
+  }
+  const removeTokenInput = $("#removeTokenOnSuccess");
+  if (removeTokenInput && typeof draft.removeTokenOnSuccess === "boolean") {
+    removeTokenInput.checked = draft.removeTokenOnSuccess;
+    restored = true;
+  }
+  if (restored) setPlusJobDraftStatus("已恢复上次填写");
+}
+
+function bindPlusJobDraftAutosave() {
+  const form = $("#job-form");
+  if (!form) return;
+  form.addEventListener("input", savePlusJobDraft);
+  form.addEventListener("change", savePlusJobDraft);
+}
+
+function setPlusJobDraftStatus(text) {
+  const el = $("#plus-draft-status");
+  if (el) el.textContent = text;
+}
+
+function clearPlusJobDraft() {
+  try {
+    localStorage.removeItem(PLUS_JOB_DRAFT_KEY);
+  } catch {
+    // Ignore storage failures.
+  }
+  for (const id of PLUS_JOB_DRAFT_FIELDS) {
+    const input = $(`#${id}`);
+    if (input) input.value = "";
+  }
+  const removeTokenInput = $("#removeTokenOnSuccess");
+  if (removeTokenInput) removeTokenInput.checked = false;
+  const otpInput = $("#otp");
+  if (otpInput) otpInput.value = "";
+  setPlusJobDraftStatus("缓存已清空");
+  toast("创建任务表单缓存已清空");
 }
 
 async function api(path, options = {}) {
@@ -422,6 +497,7 @@ $("#import-btn").addEventListener("click", async () => {
 
 $("#reload-ats").addEventListener("click", () => loadAts().catch((error) => toast(error.message)));
 $("#refresh-jobs").addEventListener("click", () => loadJobs().catch((error) => toast(error.message)));
+$("#clear-plus-draft").addEventListener("click", clearPlusJobDraft);
 
 $("#check-selected").addEventListener("click", async () => {
   if (!selectedHashes.size) return toast("先选择 AT");
@@ -449,6 +525,7 @@ $("#job-form").addEventListener("submit", async (event) => {
   const form = new FormData(event.currentTarget);
   const base = Object.fromEntries(form.entries());
   base.removeTokenOnSuccess = $("#removeTokenOnSuccess").checked;
+  savePlusJobDraft();
   const hashes = [...selectedHashes];
   for (const hash of hashes) {
     const body = {...base, tokenHash: hash};
@@ -511,6 +588,8 @@ document.addEventListener("keydown", (event) => {
 });
 
 async function init() {
+  restorePlusJobDraft();
+  bindPlusJobDraftAutosave();
   await Promise.all([loadAts(), loadJobs(), loadAccount(), loadConfig()]);
 }
 
