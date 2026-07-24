@@ -299,7 +299,7 @@ $taskId = $result.tasks[0].id
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `count` | `1` | 创建多少个注册任务，范围 1-100 |
-| `concurrency` | `1` | 注册并发，范围 1-10 |
+| `concurrency` | `1` | 注册并发，范围 1-20 |
 | `tokenOut` | PPXY `TOKEN_FILE` | 成功 AT 写入路径 |
 | `sentinelBrowserProxy` | 环境变量 | 可选，Sentinel 浏览器代理 |
 | `sentinelBrowserPath` | 环境变量 | 可选，Chrome/浏览器路径 |
@@ -774,7 +774,7 @@ ApiPost "/api/oa/tasks" @{
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `count` | `100` | 最多创建多少个 OA 任务 |
-| `concurrency` | `1` | OA 任务并发，范围 1-10 |
+| `concurrency` | `1` | OA 任务并发，范围 1-20 |
 | `tokenHashes` | 空 | 指定 AT hash 列表，不传则从 AT 池顺序选择 |
 | `password` | `config.defaultPassword` | 手机号账号密码 |
 | `tokenOut` | PPXY `TOKEN_FILE` | 成功后 SUB2API credentials 中的 access token 追加路径 |
@@ -971,4 +971,3 @@ node .\node_modules\tsx\dist\cli.mjs src/oa-sub2api.ts `
 5. 不在对话、日志或文档中输出完整密钥、完整代理密码、完整 access token。
 6. 需要并发时从小并发开始：注册建议 `1-2`，OA 建议 `1-3`，Plus 根据 PPXY 额度决定。
 7. 成功判定以 API 状态为准，不以命令退出前的单条日志为准。
-

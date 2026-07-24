@@ -682,7 +682,7 @@ async function runOnce(): Promise<void> {
             console.warn(`[phone-signup] 邮箱准备失败 (无 add-email 兜底): ${(e as Error).message}`);
         }
 
-        const webLoginClient = new OpenAIClient({
+        let webLoginClient = new OpenAIClient({
             email: registeredPhone,
             password: appConfig.defaultPassword,
             deviceProfile: generateRandomDeviceProfile(),
@@ -691,22 +691,39 @@ async function runOnce(): Promise<void> {
             bindEmail,
             fetchAddEmailOtp,
         });
-        try {
-            await webLoginClient.authLoginChatGPTWeb();
-            console.log(`[phone-signup] ChatGPT web 登录成功，session 已建立`);
-        } catch (e) {
-            console.warn(`[phone-signup] ChatGPT web 登录失败: ${(e as Error).message}`);
-        }
 
-        // 拿 ChatGPT plan accessToken（用 web login 后的 cookie）
+        // ChatGPT web session 偶发不下发 csrf/session token；注册成功后最多重试 3 次取 accessToken。
         let chatgptAccessToken = "";
-        try {
-            chatgptAccessToken = await webLoginClient.getChatGPTAccessToken();
-        } catch (err) {
-            console.warn(`[警告] web login 拿 ChatGPT accessToken 失败: ${(err as Error).message}`);
+        let lastWebTokenError = "";
+        for (let attempt = 1; attempt <= 3; attempt += 1) {
+            if (attempt > 1) {
+                await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
+                webLoginClient = new OpenAIClient({
+                    email: registeredPhone,
+                    password: appConfig.defaultPassword,
+                    deviceProfile: generateRandomDeviceProfile(),
+                    manualMode: manualOtp,
+                    smsBroker,
+                    bindEmail,
+                    fetchAddEmailOtp,
+                });
+            }
+            try {
+                console.log(`[phone-signup] ChatGPT web 登录取 accessToken (${attempt}/3)...`);
+                await webLoginClient.authLoginChatGPTWeb();
+                console.log(`[phone-signup] ChatGPT web 登录成功，session 已建立`);
+                chatgptAccessToken = await webLoginClient.getChatGPTAccessToken();
+                if (chatgptAccessToken) break;
+            } catch (err) {
+                lastWebTokenError = (err as Error).message;
+                console.warn(`[警告] web login 拿 ChatGPT accessToken 失败 (${attempt}/3): ${lastWebTokenError}`);
+            }
         }
         if (!chatgptAccessToken) {
-            throw new Error("phone-signup 完成但拿不到 ChatGPT accessToken");
+            console.warn(`[phone-signup] 完成但 3 次都拿不到 ChatGPT accessToken${lastWebTokenError ? `: ${lastWebTokenError}` : ""}`);
+            console.log(`[phone] ${registeredPhone}`);
+            console.log(`[POOL-RESULT] status=registered_no_at phone=${registeredPhone}`);
+            return;
         }
         const accessTokenFile = await webLoginClient.saveChatGPTAccessToken(chatgptAccessToken);
         console.log(`[access_token_file] ${accessTokenFile}`);

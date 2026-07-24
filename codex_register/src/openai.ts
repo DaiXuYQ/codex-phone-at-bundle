@@ -42,10 +42,22 @@ function resolveProxyUrl(): string {
     for (const key of ["OPENAI_PROXY_URL", "DEFAULT_PROXY_URL"]) {
         if (process.env[key] !== undefined) {
             const value = String(process.env[key] ?? "").trim();
-            return value.toLowerCase() === "direct" ? "" : value;
+            return normalizeProxyUrl(value);
         }
     }
-    return (appConfig.defaultProxyUrl || "").trim();
+    return normalizeProxyUrl(appConfig.defaultProxyUrl || "");
+}
+
+function normalizeProxyUrl(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.toLowerCase() === "direct") return "";
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed;
+    const parts = trimmed.split(":");
+    if (parts.length >= 4 && /^[^:]+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+        const [host, port, username, ...passwordParts] = parts;
+        return `http://${encodeURIComponent(username)}:${encodeURIComponent(passwordParts.join(":"))}@${host}:${port}`;
+    }
+    return `http://${trimmed}`;
 }
 
 function resolveFetchTimeoutMs(): number {

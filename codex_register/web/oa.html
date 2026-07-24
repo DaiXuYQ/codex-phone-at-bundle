@@ -48,6 +48,7 @@
         <div class="row toolbar">
           <button id="reload-emails" class="small" type="button">刷新邮箱</button>
           <button id="open-email-pool" class="small" type="button">查看邮箱池</button>
+          <button id="open-duck-mail" class="small" type="button">Duck 邮箱</button>
           <button id="reload-ats" class="small" type="button">刷新 AT</button>
           <button id="open-at-pool" class="small" type="button">查看号码池</button>
         </div>
@@ -128,7 +129,7 @@
             </div>
             <div class="field">
               <label for="concurrency">并发</label>
-              <input id="concurrency" name="concurrency" type="number" min="1" max="10" value="1">
+              <input id="concurrency" name="concurrency" type="number" min="1" max="20" value="1">
             </div>
           </div>
           <div class="field">
@@ -263,6 +264,136 @@
               <button id="import-btn" class="primary" type="button">确认导入</button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="duck-mail-modal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-backdrop" data-close-duck-mail></div>
+      <div class="modal-panel modal-narrow">
+        <div class="modal-head">
+          <div>
+            <h2>Duck 邮箱接入 OA</h2>
+            <p class="muted">生成 @duck.com 别名，并按现有 mailboxUrl 方式导入 OA 邮箱池。</p>
+          </div>
+          <button class="ghost icon-btn" type="button" data-close-duck-mail>×</button>
+        </div>
+        <div class="modal-body">
+          <form id="duck-mail-form">
+            <div class="field">
+              <label for="duckMode">接入方式</label>
+              <select id="duckMode" name="mode">
+                <option value="cf">域名邮箱 / CF 固定收件箱转发</option>
+                <option value="imap">QQ 邮箱 / IMAP 转发</option>
+              </select>
+              <div class="hint">两种方式都需要 DuckDuckGo Email Protection 的 Bearer Token 来创建 duck 别名。</div>
+            </div>
+            <label class="check-row">
+              <input id="duckEnabled" name="ddgEnabled" type="checkbox">
+              <span>启用 Duck 作为 OA/free 默认邮箱源（启用后不从邮箱池取）</span>
+            </label>
+            <div class="field">
+              <label for="duckToken">DDG Token</label>
+              <input id="duckToken" name="ddgToken" type="password" autocomplete="new-password" placeholder="Authorization: Bearer ...">
+            </div>
+            <div class="split">
+              <div class="field">
+                <label for="duckAliasDomain">别名域名</label>
+                <input id="duckAliasDomain" name="ddgAliasDomain" placeholder="duck.com">
+              </div>
+              <div class="field">
+                <label for="duckAddressPrefix">前缀(可选)</label>
+                <input id="duckAddressPrefix" name="ddgAddressPrefix" placeholder="仅自定义域名时使用">
+              </div>
+            </div>
+            <div class="field">
+              <label for="duckProxyUrl">DDG/IMAP 代理(可选)</label>
+              <input id="duckProxyUrl" name="ddgProxyUrl" placeholder="留空使用 defaultProxyUrl">
+            </div>
+
+            <div id="duck-cf-panel" class="config-strip">
+              <h3>CF 固定收件箱</h3>
+              <div class="field">
+                <label for="duckCfApiBaseUrl">CF 邮箱 API Base</label>
+                <input id="duckCfApiBaseUrl" name="ddgCfApiBaseUrl" placeholder="https://your-worker.example">
+              </div>
+              <div class="field">
+                <label for="duckCfInboxJwt">固定收件箱 JWT</label>
+                <input id="duckCfInboxJwt" name="ddgCfInboxJwt" type="password" autocomplete="new-password">
+              </div>
+              <div class="split">
+                <div class="field">
+                  <label for="duckCfApiKey">API Key(可选)</label>
+                  <input id="duckCfApiKey" name="ddgCfApiKey" type="password" autocomplete="new-password">
+                </div>
+                <div class="field">
+                  <label for="duckCfAuthMode">认证方式</label>
+                  <select id="duckCfAuthMode" name="ddgCfAuthMode">
+                    <option value="none">none</option>
+                    <option value="bearer">bearer</option>
+                    <option value="x-api-key">x-api-key</option>
+                    <option value="x-admin-key">x-admin-key</option>
+                    <option value="query-key">query-key</option>
+                  </select>
+                </div>
+              </div>
+              <div class="field">
+                <label for="duckCfMessagesPath">邮件列表路径</label>
+                <input id="duckCfMessagesPath" name="ddgCfMessagesPath" placeholder="/api/mails">
+              </div>
+            </div>
+
+            <div id="duck-imap-panel" class="config-strip hidden">
+              <h3>QQ / IMAP 收件箱</h3>
+              <div class="field">
+                <label for="duckImapEmail">IMAP 邮箱</label>
+                <input id="duckImapEmail" name="ddgImapEmail" placeholder="your@qq.com">
+              </div>
+              <div class="field">
+                <label for="duckImapPassword">IMAP 授权码</label>
+                <input id="duckImapPassword" name="ddgImapPassword" type="password" autocomplete="new-password">
+              </div>
+              <div class="split">
+                <div class="field">
+                  <label for="duckImapHost">Host</label>
+                  <input id="duckImapHost" name="ddgImapHost" placeholder="imap.qq.com">
+                </div>
+                <div class="field">
+                  <label for="duckImapPort">Port</label>
+                  <input id="duckImapPort" name="ddgImapPort" type="number" min="1" max="65535" value="993">
+                </div>
+              </div>
+              <div class="split">
+                <div class="field">
+                  <label for="duckImapMailbox">Mailbox</label>
+                  <input id="duckImapMailbox" name="ddgImapMailbox" placeholder="INBOX">
+                </div>
+                <div class="field">
+                  <label for="duckImapSearchLimit">扫描数量</label>
+                  <input id="duckImapSearchLimit" name="ddgImapSearchLimit" type="number" min="1" max="500" value="30">
+                </div>
+              </div>
+            </div>
+
+            <div class="split">
+              <div class="field">
+                <label for="duckCount">生成数量</label>
+                <input id="duckCount" name="count" type="number" min="1" max="500" value="1">
+              </div>
+              <div class="field">
+                <label for="duckPollIntervalMs">轮询间隔(ms)</label>
+                <input id="duckPollIntervalMs" name="ddgPollIntervalMs" type="number" min="1000" value="5000">
+              </div>
+            </div>
+            <div class="row spread">
+              <span id="duck-mail-summary" class="muted"></span>
+              <div class="row">
+                <button id="save-duck-mail" type="submit">保存配置</button>
+                <button id="generate-duck-mail" class="primary" type="button">生成并导入</button>
+              </div>
+            </div>
+          </form>
+          <pre id="duck-mail-result" class="probe-result hidden"></pre>
         </div>
       </div>
     </div>

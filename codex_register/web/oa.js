@@ -212,7 +212,7 @@ function renderSelectedEmailSummary() {
 }
 
 function atUsableForOa(item) {
-  return Boolean(item?.phone) && !item?.expired && item?.oa?.eligible !== false;
+  return Boolean(item?.phone) && item?.oa?.eligible !== false;
 }
 
 function syncSelectedAtsWithPool() {
@@ -694,14 +694,14 @@ function oaAtModeText(item) {
 
 function oaAtModeClass(item) {
   if (!item.phone) return "failed";
-  if (item.expired) return "failed";
   if (item.oa?.mode === "disabled") return "warn";
+  if (item.expired) return "warn";
   return "success";
 }
 
 function oaAtStatusText(item) {
   if (!item.phone) return "无手机号";
-  if (item.expired) return "已过期";
+  if (item.expired) return "AT 已过期 / 可 OA";
   return oaAtModeText(item);
 }
 
@@ -1101,6 +1101,66 @@ function closeImportModal() {
   $("#import-modal").classList.add("hidden");
 }
 
+function syncDuckModePanels() {
+  const mode = $("#duckMode")?.value || "cf";
+  $("#duck-cf-panel")?.classList.toggle("hidden", mode !== "cf");
+  $("#duck-imap-panel")?.classList.toggle("hidden", mode !== "imap");
+}
+
+function openDuckMailModal() {
+  syncDuckModePanels();
+  $("#duck-mail-modal")?.classList.remove("hidden");
+  $("#duckToken")?.focus();
+}
+
+function closeDuckMailModal() {
+  $("#duck-mail-modal")?.classList.add("hidden");
+}
+
+function collectDuckMailBody() {
+  const form = $("#duck-mail-form");
+  const body = Object.fromEntries(new FormData(form).entries());
+  body.ddgEnabled = $("#duckEnabled")?.checked || false;
+  body.count = Number(body.count || 1);
+  body.ddgImapPort = Number(body.ddgImapPort || 993);
+  body.ddgImapSearchLimit = Number(body.ddgImapSearchLimit || 30);
+  body.ddgPollIntervalMs = Number(body.ddgPollIntervalMs || 5000);
+  return body;
+}
+
+async function saveDuckMailConfig(event) {
+  event?.preventDefault();
+  const data = await api("/api/config/ddg-mail", {
+    method: "PATCH",
+    body: JSON.stringify(collectDuckMailBody()),
+  });
+  configCache = data;
+  renderTargetConfig(data);
+  toast("Duck 邮箱配置已保存");
+  return data;
+}
+
+async function generateDuckMailEmails() {
+  const btn = $("#generate-duck-mail");
+  const output = $("#duck-mail-result");
+  btn.disabled = true;
+  output.classList.remove("hidden");
+  output.textContent = "正在保存配置并生成 Duck 邮箱...";
+  try {
+    await saveDuckMailConfig();
+    const body = collectDuckMailBody();
+    const result = await api("/api/oa/emails/duck/generate", {
+      method: "POST",
+      body: JSON.stringify({mode: body.mode, count: body.count}),
+    });
+    output.textContent = JSON.stringify(result, null, 2);
+    toast(`Duck 邮箱已生成并导入：新增 ${result.added || 0}，更新 ${result.updated || 0}，跳过 ${result.skipped || 0}`);
+    await loadEmails();
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function openTargetSettingsModal() {
   renderTargetPanels();
   $("#target-settings-modal").classList.remove("hidden");
@@ -1135,6 +1195,9 @@ function renderTargetConfig(data) {
   const sub2api = data.sub2api || {};
   const cpa = data.cpa || {};
   const mailApi = data.mailApi || {};
+  const ddgMail = data.ddgMail || {};
+  const ddgCf = ddgMail.cf || {};
+  const ddgImap = ddgMail.imap || {};
   const register = data.register || {};
   if ($("#sub2api-config")) $("#sub2api-config").textContent = JSON.stringify(sub2api, null, 2);
   if ($("#cpa-config")) $("#cpa-config").textContent = JSON.stringify(cpa, null, 2);
@@ -1156,6 +1219,31 @@ function renderTargetConfig(data) {
   }
   if ($("#mail-api-base-url")) {
     $("#mail-api-base-url").value = mailApi.baseUrl || "";
+  }
+  if ($("#duck-mail-form")) {
+    $("#duckEnabled").checked = Boolean(ddgMail.enabled);
+    $("#duckToken").value = "";
+    $("#duckToken").placeholder = ddgMail.tokenPresent ? "已配置，留空不修改" : "Authorization: Bearer ...";
+    $("#duckAliasDomain").value = ddgMail.aliasDomain || "duck.com";
+    $("#duckAddressPrefix").value = ddgMail.addressPrefix || "";
+    $("#duckProxyUrl").value = ddgMail.proxyUrl || "";
+    $("#duckCfApiBaseUrl").value = ddgCf.apiBaseUrl || "";
+    $("#duckCfInboxJwt").value = "";
+    $("#duckCfInboxJwt").placeholder = ddgCf.inboxJwtPresent ? "已配置，留空不修改" : "";
+    $("#duckCfApiKey").value = "";
+    $("#duckCfApiKey").placeholder = ddgCf.apiKeyPresent ? "已配置，留空不修改" : "";
+    $("#duckCfAuthMode").value = ddgCf.authMode || "none";
+    $("#duckCfMessagesPath").value = ddgCf.messagesPath || "/api/mails";
+    $("#duckImapEmail").value = ddgImap.email || "";
+    $("#duckImapPassword").value = "";
+    $("#duckImapPassword").placeholder = ddgImap.passwordPresent ? "已配置，留空不修改" : "";
+    $("#duckImapHost").value = ddgImap.host || "imap.qq.com";
+    $("#duckImapPort").value = ddgImap.port || 993;
+    $("#duckImapMailbox").value = ddgImap.mailbox || "INBOX";
+    $("#duckImapSearchLimit").value = ddgImap.searchLimit || 30;
+    $("#duckPollIntervalMs").value = ddgMail.pollIntervalMs || 5000;
+    $("#duck-mail-summary").textContent = `启用：${ddgMail.enabled ? "是" : "否"}；DDG Token：${ddgMail.tokenPresent ? "已配置" : "未配置"}；CF：${ddgCf.apiBaseUrl ? "已配置" : "未配置"}；IMAP：${ddgImap.email || "未配置"}`;
+    syncDuckModePanels();
   }
   if ($("#oa-proxy-current")) {
       $("#oa-proxy-current").textContent = `当前默认代理：${register.oaProxyUrl || register.defaultProxyUrl || "直连"}`;
@@ -1261,6 +1349,7 @@ async function saveOaProxy() {
 
 $("#open-import").addEventListener("click", openImportModal);
 $("#open-email-pool").addEventListener("click", openEmailListModal);
+$("#open-duck-mail")?.addEventListener("click", openDuckMailModal);
 $("#open-at-pool")?.addEventListener("click", openAtListModal);
 $("#open-email-picker")?.addEventListener("click", openEmailListModal);
 $("#open-at-picker")?.addEventListener("click", openAtListModal);
@@ -1286,6 +1375,9 @@ $("#probe-oa-direct").addEventListener("click", () => probeOaDirect().catch((err
 $("#save-oa-proxy").addEventListener("click", () => saveOaProxy().catch((error) => toast(error.message)));
 $("#oaTarget")?.addEventListener("change", renderTargetPanels);
 $("#open-target-settings")?.addEventListener("click", openTargetSettingsModal);
+$("#duckMode")?.addEventListener("change", syncDuckModePanels);
+$("#duck-mail-form")?.addEventListener("submit", (event) => saveDuckMailConfig(event).catch((error) => toast(error.message)));
+$("#generate-duck-mail")?.addEventListener("click", () => generateDuckMailEmails().catch((error) => toast(error.message)));
 $("#clear-selected-emails")?.addEventListener("click", () => {
   selectedEmailSet.clear();
   renderSelectedEmailSummary();
@@ -1299,6 +1391,7 @@ $("#clear-selected-ats")?.addEventListener("click", () => {
 
 document.querySelectorAll("[data-close-target-settings]").forEach((el) => el.addEventListener("click", closeTargetSettingsModal));
 document.querySelectorAll("[data-close-import]").forEach((el) => el.addEventListener("click", closeImportModal));
+document.querySelectorAll("[data-close-duck-mail]").forEach((el) => el.addEventListener("click", closeDuckMailModal));
 document.querySelectorAll("[data-close-task]").forEach((el) => el.addEventListener("click", closeTaskModal));
 document.querySelectorAll("[data-close-email]").forEach((el) => el.addEventListener("click", closeEmailModal));
 document.querySelectorAll("[data-close-email-list]").forEach((el) => el.addEventListener("click", closeEmailListModal));
@@ -1394,6 +1487,7 @@ document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
   closeTargetSettingsModal();
   closeImportModal();
+  closeDuckMailModal();
   closeTaskModal();
   closeEmailModal();
   closeEmailListModal();

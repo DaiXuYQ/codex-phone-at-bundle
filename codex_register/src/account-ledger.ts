@@ -23,6 +23,8 @@ export interface AccountRegisterSnapshot {
     taskId: string;
     batchId?: string;
     status: TaskStatus;
+    phoneSignupSuccess?: boolean;
+    missingAccessToken?: boolean;
     phoneProvider?: string;
     activationId?: string;
     smsCost?: number;
@@ -152,6 +154,8 @@ export interface LedgerTaskLike {
     sourceAccessTokenHash?: string;
     accessTokenHash?: string;
     accessTokenPreview?: string;
+    phoneSignupSuccess?: boolean;
+    missingAccessToken?: boolean;
     error?: string;
     errorType?: string;
 }
@@ -388,6 +392,8 @@ export class AccountLedger {
                 taskId: task.id,
                 batchId: task.batchId,
                 status: task.status,
+                phoneSignupSuccess: task.phoneSignupSuccess,
+                missingAccessToken: task.missingAccessToken,
                 phoneProvider: task.phoneProvider,
                 activationId: task.phoneActivationId,
                 smsCost: task.smsCost,

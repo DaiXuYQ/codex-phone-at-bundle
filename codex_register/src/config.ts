@@ -1,7 +1,7 @@
 import {readFileSync} from "node:fs";
 import path from "node:path";
 
-export type MailProviderName = "2925" | "gmail" | "proxiedmail" | "cloudflare" | "hotmail" | "gptmail";
+export type MailProviderName = "2925" | "gmail" | "proxiedmail" | "cloudflare" | "hotmail" | "gptmail" | "ddg_mail" | "imap_mail";
 export type SmsProviderName = "hero-sms" | "smsbower";
 
 interface AppConfigFile {
@@ -17,6 +17,26 @@ interface AppConfigFile {
     cloudflareEmailDomain?: unknown;
     cloudflareApiBaseUrl?: unknown;
     cloudflareApiKey?: unknown;
+    ddgToken?: unknown;
+    ddgMode?: unknown;
+    ddgEnabled?: unknown;
+    ddgAliasDomain?: unknown;
+    ddgAddressPrefix?: unknown;
+    ddgProxyUrl?: unknown;
+    ddgRequestTimeoutMs?: unknown;
+    ddgPollAttempts?: unknown;
+    ddgPollIntervalMs?: unknown;
+    ddgCfApiBaseUrl?: unknown;
+    ddgCfInboxJwt?: unknown;
+    ddgCfApiKey?: unknown;
+    ddgCfAuthMode?: unknown;
+    ddgCfMessagesPath?: unknown;
+    ddgImapEmail?: unknown;
+    ddgImapPassword?: unknown;
+    ddgImapHost?: unknown;
+    ddgImapPort?: unknown;
+    ddgImapMailbox?: unknown;
+    ddgImapSearchLimit?: unknown;
     defaultProxyUrl?: unknown;
     smsProvider?: unknown;
     heroSMSApiKey?: unknown;
@@ -70,6 +90,26 @@ export interface AppConfig {
     cloudflareEmailDomain: string;
     cloudflareApiBaseUrl: string;
     cloudflareApiKey: string;
+    ddgToken: string;
+    ddgMode: string;
+    ddgEnabled: boolean;
+    ddgAliasDomain: string;
+    ddgAddressPrefix: string;
+    ddgProxyUrl: string;
+    ddgRequestTimeoutMs: number;
+    ddgPollAttempts: number;
+    ddgPollIntervalMs: number;
+    ddgCfApiBaseUrl: string;
+    ddgCfInboxJwt: string;
+    ddgCfApiKey: string;
+    ddgCfAuthMode: string;
+    ddgCfMessagesPath: string;
+    ddgImapEmail: string;
+    ddgImapPassword: string;
+    ddgImapHost: string;
+    ddgImapPort: number;
+    ddgImapMailbox: string;
+    ddgImapSearchLimit: number;
     defaultProxyUrl: string;
     smsProvider: SmsProviderName;
     heroSMSApiKey?: string;
@@ -123,6 +163,26 @@ const DEFAULT_CONFIG: AppConfig = {
     cloudflareEmailDomain: "",
     cloudflareApiBaseUrl: "",
     cloudflareApiKey: "",
+    ddgToken: "",
+    ddgMode: "cf",
+    ddgEnabled: false,
+    ddgAliasDomain: "duck.com",
+    ddgAddressPrefix: "",
+    ddgProxyUrl: "",
+    ddgRequestTimeoutMs: 30000,
+    ddgPollAttempts: 24,
+    ddgPollIntervalMs: 5000,
+    ddgCfApiBaseUrl: "",
+    ddgCfInboxJwt: "",
+    ddgCfApiKey: "",
+    ddgCfAuthMode: "none",
+    ddgCfMessagesPath: "/api/mails",
+    ddgImapEmail: "",
+    ddgImapPassword: "",
+    ddgImapHost: "imap.qq.com",
+    ddgImapPort: 993,
+    ddgImapMailbox: "INBOX",
+    ddgImapSearchLimit: 30,
     defaultProxyUrl: "http://127.0.0.1:10808",
     smsProvider: "hero-sms",
     heroSMSApiKey: undefined,
@@ -161,7 +221,16 @@ function normalizeNumber(value: unknown, fallback: number): number {
 }
 
 function normalizeProvider(value: unknown): MailProviderName {
-    if (value === "2925" || value === "gmail" || value === "proxiedmail" || value === "cloudflare" || value === "hotmail" || value === "gptmail") {
+    if (
+        value === "2925"
+        || value === "gmail"
+        || value === "proxiedmail"
+        || value === "cloudflare"
+        || value === "hotmail"
+        || value === "gptmail"
+        || value === "ddg_mail"
+        || value === "imap_mail"
+    ) {
         return value;
     }
     return DEFAULT_CONFIG.provider;
@@ -280,6 +349,68 @@ function loadConfig(): AppConfig {
             typeof parsed.cloudflareApiKey === "string"
                 ? parsed.cloudflareApiKey.trim()
                 : DEFAULT_CONFIG.cloudflareApiKey,
+        ddgToken:
+            typeof parsed.ddgToken === "string"
+                ? parsed.ddgToken.trim()
+                : DEFAULT_CONFIG.ddgToken,
+        ddgMode:
+            typeof parsed.ddgMode === "string" && parsed.ddgMode.trim()
+                ? parsed.ddgMode.trim()
+                : DEFAULT_CONFIG.ddgMode,
+        ddgEnabled: normalizeBoolean(parsed.ddgEnabled, DEFAULT_CONFIG.ddgEnabled),
+        ddgAliasDomain:
+            typeof parsed.ddgAliasDomain === "string" && parsed.ddgAliasDomain.trim()
+                ? parsed.ddgAliasDomain.trim()
+                : DEFAULT_CONFIG.ddgAliasDomain,
+        ddgAddressPrefix:
+            typeof parsed.ddgAddressPrefix === "string"
+                ? parsed.ddgAddressPrefix.trim()
+                : DEFAULT_CONFIG.ddgAddressPrefix,
+        ddgProxyUrl:
+            typeof parsed.ddgProxyUrl === "string"
+                ? parsed.ddgProxyUrl.trim()
+                : DEFAULT_CONFIG.ddgProxyUrl,
+        ddgRequestTimeoutMs: normalizeNumber(parsed.ddgRequestTimeoutMs, DEFAULT_CONFIG.ddgRequestTimeoutMs),
+        ddgPollAttempts: normalizeNumber(parsed.ddgPollAttempts, DEFAULT_CONFIG.ddgPollAttempts),
+        ddgPollIntervalMs: normalizeNumber(parsed.ddgPollIntervalMs, DEFAULT_CONFIG.ddgPollIntervalMs),
+        ddgCfApiBaseUrl:
+            typeof parsed.ddgCfApiBaseUrl === "string"
+                ? parsed.ddgCfApiBaseUrl.trim()
+                : DEFAULT_CONFIG.ddgCfApiBaseUrl,
+        ddgCfInboxJwt:
+            typeof parsed.ddgCfInboxJwt === "string"
+                ? parsed.ddgCfInboxJwt.trim()
+                : DEFAULT_CONFIG.ddgCfInboxJwt,
+        ddgCfApiKey:
+            typeof parsed.ddgCfApiKey === "string"
+                ? parsed.ddgCfApiKey.trim()
+                : DEFAULT_CONFIG.ddgCfApiKey,
+        ddgCfAuthMode:
+            typeof parsed.ddgCfAuthMode === "string" && parsed.ddgCfAuthMode.trim()
+                ? parsed.ddgCfAuthMode.trim()
+                : DEFAULT_CONFIG.ddgCfAuthMode,
+        ddgCfMessagesPath:
+            typeof parsed.ddgCfMessagesPath === "string" && parsed.ddgCfMessagesPath.trim()
+                ? parsed.ddgCfMessagesPath.trim()
+                : DEFAULT_CONFIG.ddgCfMessagesPath,
+        ddgImapEmail:
+            typeof parsed.ddgImapEmail === "string"
+                ? parsed.ddgImapEmail.trim()
+                : DEFAULT_CONFIG.ddgImapEmail,
+        ddgImapPassword:
+            typeof parsed.ddgImapPassword === "string"
+                ? parsed.ddgImapPassword.trim()
+                : DEFAULT_CONFIG.ddgImapPassword,
+        ddgImapHost:
+            typeof parsed.ddgImapHost === "string" && parsed.ddgImapHost.trim()
+                ? parsed.ddgImapHost.trim()
+                : DEFAULT_CONFIG.ddgImapHost,
+        ddgImapPort: normalizeNumber(parsed.ddgImapPort, DEFAULT_CONFIG.ddgImapPort),
+        ddgImapMailbox:
+            typeof parsed.ddgImapMailbox === "string" && parsed.ddgImapMailbox.trim()
+                ? parsed.ddgImapMailbox.trim()
+                : DEFAULT_CONFIG.ddgImapMailbox,
+        ddgImapSearchLimit: normalizeNumber(parsed.ddgImapSearchLimit, DEFAULT_CONFIG.ddgImapSearchLimit),
         defaultProxyUrl:
             typeof parsed.defaultProxyUrl === "string"
                 ? parsed.defaultProxyUrl.trim()

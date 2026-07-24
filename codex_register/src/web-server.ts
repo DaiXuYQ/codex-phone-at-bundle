@@ -8,6 +8,8 @@ import {fileURLToPath} from "node:url";
 import {Agent, ProxyAgent, type Dispatcher} from "undici";
 import {DEFAULT_CLIENT_ID, DEFAULT_REDIRECT_URI, DEFAULT_USER_AGENT} from "./constants.js";
 import {createAccountLedger, type AccountRecord} from "./account-ledger.js";
+import {createDdgMailbox, fetchLatestDdgMessage, type DdgMailMode} from "./mail/ddg.js";
+import {createRemailMailbox, fetchLatestRemailMessage, isRemailEnabled} from "./mail/remail.js";
 import {createHeroSmsProvider} from "./sms/heroSMS.js";
 import type {SmsProvider} from "./sms/provider.js";
 import {createSmsBowerProvider} from "./sms/smsbower.js";
@@ -40,6 +42,9 @@ interface RegisterTask {
     relatedOaError?: string;
     autoTargetSuccess?: number;
     autoMaxAttempts?: number;
+    autoBatchCanceledAt?: string;
+    phoneSignupSuccess?: boolean;
+    missingAccessToken?: boolean;
     createdAt: string;
     updatedAt: string;
     startedAt?: string;
@@ -103,6 +108,8 @@ interface OaEmailPoolItem {
     bindUpdatedAt?: string;
     bindNote?: string;
 }
+
+type OaEmailSourceItem = Pick<OaEmailPoolItem, "email" | "mailboxUrl" | "raw" | "kind">;
 
 interface OaEmailStatusRecord {
     email: string;
@@ -296,6 +303,8 @@ const runningWorkflows = new Set<string>();
 const smsCancelInFlight = new Set<string>();
 let registerQueue: RuntimeRegisterTask[] = [];
 let freeAutoReplenishQueue: Promise<void> = Promise.resolve();
+let currentWebOrigin = "http://127.0.0.1:8788";
+const MAX_TASK_CONCURRENCY = 20;
 const taskMaxConcurrency: Record<TaskKind, number> = {
     register: 1,
     "oa-sub2api": 1,
@@ -403,6 +412,21 @@ async function loadStores(): Promise<void> {
     const loadedTasks = await readJsonFile<RegisterTask[]>(tasksFile, []);
     for (const task of loadedTasks) {
         const runtime = normalizeLoadedTask(task);
+        if (runtime.kind === "register" && runtime.status === "failed" && runtime.phoneSignupSuccess && runtime.missingAccessToken) {
+            runtime.status = "success";
+            runtime.exitCode = 0;
+            runtime.error = runtime.error || "phone signup succeeded but accessToken was not captured";
+            runtime.errorType = undefined;
+            runtime.errorSuggestion = undefined;
+            runtime.finishedAt = runtime.finishedAt ?? nowIso();
+            runtime.updatedAt = nowIso();
+            appendTaskLog(runtime, "system", "migrated as success: phone signup completed but no AT was captured");
+            const account = await accountLedger.upsertFromTask(runtime, {eventType: "REGISTER_TASK_MIGRATED_NO_AT"});
+            if (account && runtime.accountId !== account.id) {
+                runtime.accountId = account.id;
+            }
+            loadedTasksChanged = true;
+        }
         if (runtime.status === "running" || runtime.status === "queued") {
             if (taskHasSuccessOutput(runtime)) {
                 runtime.status = "success";
@@ -460,8 +484,8 @@ async function loadStores(): Promise<void> {
         const normalized: FreeAutoBatchRecord = {
             ...batch,
             status: batch.status === "running" ? "running" : batch.status,
-            registerConcurrency: safeNumber(batch.registerConcurrency, 1, 1, 10),
-            oaConcurrency: safeNumber(batch.oaConcurrency, 1, 1, 10),
+            registerConcurrency: safeNumber(batch.registerConcurrency, 1, 1, MAX_TASK_CONCURRENCY),
+            oaConcurrency: safeNumber(batch.oaConcurrency, 1, 1, MAX_TASK_CONCURRENCY),
             createdAttempts: batch.createdAttempts ?? 0,
             successCount: batch.successCount ?? 0,
             activeCount: batch.activeCount ?? 0,
@@ -627,10 +651,31 @@ function getOaProxyUrl(config = readConfigSync()): string {
     for (const key of ["OPENAI_PROXY_URL", "DEFAULT_PROXY_URL"]) {
         if (process.env[key] !== undefined) {
             const value = String(process.env[key] ?? "").trim();
-            return value.toLowerCase() === "direct" ? "" : value;
+            return normalizeProxyUrl(value);
         }
     }
-    return asString(config.defaultProxyUrl).trim();
+    return normalizeProxyUrl(asString(config.defaultProxyUrl));
+}
+
+function normalizeProxyUrl(value: string): string {
+    const trimmed = value.trim();
+    if (!trimmed || trimmed.toLowerCase() === "direct") return "";
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+        new URL(trimmed);
+        return trimmed;
+    }
+    const parts = trimmed.split(":");
+    if (parts.length >= 4 && /^[^:]+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+        const [host, port, username, ...passwordParts] = parts;
+        const user = encodeURIComponent(username);
+        const pass = encodeURIComponent(passwordParts.join(":"));
+        const normalized = `http://${user}:${pass}@${host}:${port}`;
+        new URL(normalized);
+        return normalized;
+    }
+    const normalized = `http://${trimmed}`;
+    new URL(normalized);
+    return normalized;
 }
 
 function validateMailApiBaseUrl(value: string): string {
@@ -685,6 +730,16 @@ function asString(value: unknown, fallback = ""): string {
 
 function asNumber(value: unknown, fallback: number): number {
     return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function asBoolean(value: unknown, fallback = false): boolean {
+    if (typeof value === "boolean") return value;
+    if (typeof value === "string") {
+        const normalized = value.trim().toLowerCase();
+        if (["true", "1", "yes", "on"].includes(normalized)) return true;
+        if (["false", "0", "no", "off"].includes(normalized)) return false;
+    }
+    return fallback;
 }
 
 function asNumberArray(value: unknown): number[] {
@@ -1339,6 +1394,8 @@ function getConfigSummary(): Record<string, unknown> {
         mailApi: {
             baseUrl: getMailApiBaseUrl(),
         },
+        remail: getRemailConfigView(config),
+        ddgMail: getDdgConfigView(config),
         runtime: {
             host: process.env.HOST || "127.0.0.1",
             port: process.env.PORT || "auto",
@@ -1459,13 +1516,136 @@ async function updateMailApiConfig(body: Record<string, unknown>): Promise<Recor
     return getConfigSummary();
 }
 
+function normalizeDdgMode(value: unknown): DdgMailMode {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (normalized === "imap" || normalized === "imap_mail" || normalized === "qq") return "imap";
+    return "cf";
+}
+
+function getDdgConfigView(config = readConfigSync()): Record<string, unknown> {
+    const ddgToken = asString(config.ddgToken);
+    const cfInboxJwt = asString(config.ddgCfInboxJwt);
+    const cfApiKey = asString(config.ddgCfApiKey);
+    const imapPassword = asString(config.ddgImapPassword);
+    return {
+        enabled: asBoolean(config.ddgEnabled),
+        tokenPresent: Boolean(ddgToken),
+        tokenMasked: ddgToken ? maskSecret(ddgToken) : "",
+        mode: normalizeDdgMode(config.ddgMode),
+        aliasDomain: asString(config.ddgAliasDomain, "duck.com"),
+        addressPrefix: asString(config.ddgAddressPrefix),
+        proxyUrl: asString(config.ddgProxyUrl),
+        effectiveProxyUrlMasked: maskUrlSecret(asString(config.ddgProxyUrl) || asString(config.defaultProxyUrl)),
+        requestTimeoutMs: asNumber(config.ddgRequestTimeoutMs, 30000),
+        pollAttempts: asNumber(config.ddgPollAttempts, 24),
+        pollIntervalMs: asNumber(config.ddgPollIntervalMs, 5000),
+        cf: {
+            apiBaseUrl: asString(config.ddgCfApiBaseUrl),
+            inboxJwtPresent: Boolean(cfInboxJwt),
+            inboxJwtMasked: cfInboxJwt ? maskSecret(cfInboxJwt) : "",
+            apiKeyPresent: Boolean(cfApiKey),
+            apiKeyMasked: cfApiKey ? maskSecret(cfApiKey) : "",
+            authMode: asString(config.ddgCfAuthMode, "none"),
+            messagesPath: asString(config.ddgCfMessagesPath, "/api/mails"),
+        },
+        imap: {
+            email: asString(config.ddgImapEmail),
+            passwordPresent: Boolean(imapPassword),
+            passwordMasked: imapPassword ? maskSecret(imapPassword) : "",
+            host: asString(config.ddgImapHost, "imap.qq.com"),
+            port: asNumber(config.ddgImapPort, 993),
+            mailbox: asString(config.ddgImapMailbox, "INBOX"),
+            searchLimit: asNumber(config.ddgImapSearchLimit, 30),
+        },
+    };
+}
+
+function getRemailConfigView(config = readConfigSync()): Record<string, unknown> {
+    const apiKey = asString(config.remailApiKey);
+    return {
+        enabled: isRemailMailEnabled(config),
+        apiBaseUrl: asString(config.remailApiBaseUrl, "https://remail.aishop6.com"),
+        apiKeyPresent: Boolean(apiKey),
+        apiKeyMasked: apiKey ? maskSecret(apiKey) : "",
+        projectId: asNumber(config.remailProjectId, 0),
+        productId: asNumber(config.remailProductId, 0),
+        emailSuffix: asString(config.remailEmailSuffix, "outlook.com"),
+        supply: asString(config.remailSupply, "public_only"),
+        projectSearch: asString(config.remailProjectSearch, "OpenAI"),
+        requestTimeoutMs: asNumber(config.remailRequestTimeoutMs, 30000),
+    };
+}
+
+async function updateRemailConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const config = await readConfigForWrite();
+    config.remailEnabled = asBoolean(body.remailEnabled ?? body.enabled, asBoolean(config.remailEnabled));
+    const apiKey = String(body.remailApiKey ?? body.apiKey ?? "").trim();
+    if (apiKey) config.remailApiKey = apiKey;
+    const baseUrl = String(body.remailApiBaseUrl ?? body.apiBaseUrl ?? body.baseUrl ?? "").trim();
+    if (baseUrl) {
+        new URL(baseUrl);
+        config.remailApiBaseUrl = baseUrl.replace(/\/+$/g, "");
+    }
+    const suffix = String(body.remailEmailSuffix ?? body.emailSuffix ?? config.remailEmailSuffix ?? "outlook.com").trim().toLowerCase();
+    if (!["outlook.com", "hotmail.com"].includes(suffix)) throw new Error("remail 邮箱后缀只能是 outlook.com 或 hotmail.com");
+    config.remailEmailSuffix = suffix;
+    config.remailProjectId = safeNumber(body.remailProjectId ?? body.projectId, asNumber(config.remailProjectId, 0), 0, 999999999);
+    config.remailProductId = safeNumber(body.remailProductId ?? body.productId, asNumber(config.remailProductId, 0), 0, 999999999);
+    config.remailSupply = String(body.remailSupply ?? body.supply ?? config.remailSupply ?? "public_only").trim() || "public_only";
+    config.remailProjectSearch = String(body.remailProjectSearch ?? body.projectSearch ?? config.remailProjectSearch ?? "OpenAI").trim() || "OpenAI";
+    config.remailRequestTimeoutMs = safeNumber(body.remailRequestTimeoutMs ?? body.requestTimeoutMs, asNumber(config.remailRequestTimeoutMs, 30000), 5000, 300000);
+    await writeJsonFile(configFile, config);
+    return getConfigSummary();
+}
+
+function normalizeDdgAuthMode(value: unknown): string {
+    const normalized = String(value ?? "").trim().toLowerCase();
+    if (normalized === "bearer" || normalized === "x-api-key" || normalized === "x-admin-key" || normalized === "query-key") return normalized;
+    return "none";
+}
+
+async function updateDdgMailConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const config = await readConfigForWrite();
+    const setString = (key: string, value: unknown, fallback = "") => {
+        const text = String(value ?? fallback).trim();
+        config[key] = text;
+    };
+    const setSecret = (key: string, value: unknown) => {
+        const text = String(value ?? "").trim();
+        if (text) config[key] = text;
+    };
+
+    config.ddgMode = normalizeDdgMode(body.mode ?? body.ddgMode ?? config.ddgMode);
+    config.ddgEnabled = asBoolean(body.ddgEnabled ?? body.enabled, asBoolean(config.ddgEnabled));
+    setSecret("ddgToken", body.ddgToken ?? body.ddg_token);
+    setString("ddgAliasDomain", body.ddgAliasDomain ?? body.aliasDomain ?? body.alias_domain, asString(config.ddgAliasDomain, "duck.com"));
+    setString("ddgAddressPrefix", body.ddgAddressPrefix ?? body.addressPrefix ?? body.address_prefix);
+    setString("ddgProxyUrl", body.ddgProxyUrl ?? body.proxyUrl, asString(config.ddgProxyUrl));
+    config.ddgRequestTimeoutMs = safeNumber(body.ddgRequestTimeoutMs ?? body.requestTimeoutMs, asNumber(config.ddgRequestTimeoutMs, 30000), 5000, 300000);
+    config.ddgPollAttempts = safeNumber(body.ddgPollAttempts ?? body.pollAttempts, asNumber(config.ddgPollAttempts, 24), 1, 300);
+    config.ddgPollIntervalMs = safeNumber(body.ddgPollIntervalMs ?? body.pollIntervalMs, asNumber(config.ddgPollIntervalMs, 5000), 1000, 60000);
+
+    setString("ddgCfApiBaseUrl", body.ddgCfApiBaseUrl ?? body.cfApiBaseUrl ?? body.apiBaseUrl ?? body.api_base, asString(config.ddgCfApiBaseUrl));
+    setSecret("ddgCfInboxJwt", body.ddgCfInboxJwt ?? body.cfInboxJwt ?? body.cf_inbox_jwt);
+    setSecret("ddgCfApiKey", body.ddgCfApiKey ?? body.cfApiKey ?? body.cf_api_key);
+    config.ddgCfAuthMode = normalizeDdgAuthMode(body.ddgCfAuthMode ?? body.cfAuthMode ?? body.cf_auth_mode ?? config.ddgCfAuthMode);
+    setString("ddgCfMessagesPath", body.ddgCfMessagesPath ?? body.cfMessagesPath ?? body.cf_messages_path, asString(config.ddgCfMessagesPath, "/api/mails"));
+
+    setString("ddgImapEmail", body.ddgImapEmail ?? body.imapEmail ?? body.email, asString(config.ddgImapEmail));
+    setSecret("ddgImapPassword", body.ddgImapPassword ?? body.imapPassword ?? body.password);
+    setString("ddgImapHost", body.ddgImapHost ?? body.imapHost ?? body.host, asString(config.ddgImapHost, "imap.qq.com"));
+    config.ddgImapPort = safeNumber(body.ddgImapPort ?? body.imapPort ?? body.port, asNumber(config.ddgImapPort, 993), 1, 65535);
+    setString("ddgImapMailbox", body.ddgImapMailbox ?? body.imapMailbox ?? body.mailbox, asString(config.ddgImapMailbox, "INBOX"));
+    config.ddgImapSearchLimit = safeNumber(body.ddgImapSearchLimit ?? body.imapSearchLimit ?? body.searchLimit, asNumber(config.ddgImapSearchLimit, 30), 1, 500);
+
+    await writeJsonFile(configFile, config);
+    return getConfigSummary();
+}
+
 async function updateOaProxyConfig(body: Record<string, unknown>): Promise<Record<string, unknown>> {
     const config = await readConfigForWrite();
     const raw = String(body.proxyUrl ?? body.defaultProxyUrl ?? body.oaProxyUrl ?? "").trim();
-    if (raw && raw.toLowerCase() !== "direct") {
-        new URL(raw);
-    }
-    config.defaultProxyUrl = raw.toLowerCase() === "direct" ? "" : raw;
+    config.defaultProxyUrl = normalizeProxyUrl(raw);
     await writeJsonFile(configFile, config);
     return getConfigSummary();
 }
@@ -1529,7 +1709,30 @@ function parseTaskOutputLine(task: RuntimeRegisterTask, line: string, options: {
         if (token) {
             task.accessTokenHash = tokenHash(token);
             task.accessTokenPreview = tokenPreview(token);
+            task.missingAccessToken = undefined;
         }
+    }
+    const phoneSignupSuccessMatch = line.match(/phone\s+(?:注册|signup|娉ㄥ唽).*?(?:成功|success|鎴愬姛)/i);
+    const poolResultMatch = line.match(/\[POOL-RESULT\]\s+status=(\S+).*?\bphone=(\+\d+)/i);
+    if (
+        phoneSignupSuccessMatch
+        || line.includes("phone 注册成功")
+        || line.includes("phone 娉ㄥ唽鎴愬姛")
+        || poolResultMatch?.[1] === "registered_no_at"
+    ) {
+        task.phoneSignupSuccess = true;
+        const phone = poolResultMatch?.[2];
+        if (phone) {
+            task.phone = phone;
+            updateTaskTitle(task);
+        }
+    }
+    const missingAtMatch = line.match(/phone-signup\]?\s+(?:完成|completed).*?(?:拿不到|no .*accessToken|accessToken)/i)
+        || poolResultMatch?.[1] === "registered_no_at";
+    if (missingAtMatch) {
+        task.phoneSignupSuccess = true;
+        task.missingAccessToken = true;
+        task.error = line.replace(/^\[?❌?️?授权失败\]?\s*/i, "").replace(/^Error:\s*/i, "").trim();
     }
     if (line.includes("[gp_token_out]")) {
         const outputPath = extractOutputPathFromLine(line);
@@ -1631,7 +1834,7 @@ function taskHasSuccessOutput(task: RuntimeRegisterTask): boolean {
     if (task.kind === "oa-sub2api") {
         return task.oaTarget === "cpa" ? Boolean(task.cpaAccount) : Boolean(task.sub2apiAccount);
     }
-    return Boolean(task.accessTokenHash);
+    return Boolean(task.accessTokenHash || task.phoneSignupSuccess);
 }
 
 function finishTaskFromSuccessfulOutput(task: RuntimeRegisterTask, reason: string): void {
@@ -1681,7 +1884,7 @@ function finishRegisterTask(
         task.errorSuggestion = diagnosis.suggestion;
     }
     if (status === "success") {
-        task.error = undefined;
+        task.error = task.missingAccessToken ? (task.error || "phone signup succeeded but accessToken was not captured") : undefined;
         task.errorType = undefined;
         task.errorSuggestion = undefined;
     }
@@ -1721,6 +1924,7 @@ function finishRegisterTask(
 function maybeReplenishAutoRegisterBatch(task: RuntimeRegisterTask): void {
     if (task.kind !== "register" || !task.batchId || !task.autoTargetSuccess || !task.autoMaxAttempts) return;
     const batchTasks = Array.from(registerTasks.values()).filter((item) => item.kind === "register" && item.batchId === task.batchId);
+    if (batchTasks.some((item) => item.autoBatchCanceledAt)) return;
     const success = batchTasks.filter((item) => item.status === "success").length;
     const active = batchTasks.filter((item) => item.status === "queued" || item.status === "running").length;
     if (success >= task.autoTargetSuccess || active > 0 || batchTasks.length >= task.autoMaxAttempts) return;
@@ -1737,6 +1941,55 @@ function maybeReplenishAutoRegisterBatch(task: RuntimeRegisterTask): void {
         autoTargetSuccess: task.autoTargetSuccess,
         autoMaxAttempts: task.autoMaxAttempts,
     });
+}
+
+function replenishStalledAutoRegisterBatches(options: {batchId?: string; maxAgeMs?: number; reason?: string} = {}): {batches: number; tasks: number} {
+    const batches = new Map<string, RuntimeRegisterTask[]>();
+    for (const task of registerTasks.values()) {
+        if (task.kind !== "register" || !task.batchId || !task.autoTargetSuccess || !task.autoMaxAttempts) continue;
+        if (options.batchId && task.batchId !== options.batchId) continue;
+        const list = batches.get(task.batchId) ?? [];
+        list.push(task);
+        batches.set(task.batchId, list);
+    }
+
+    let recoveredBatches = 0;
+    let recoveredTasks = 0;
+    const cutoff = options.maxAgeMs ? Date.now() - options.maxAgeMs : 0;
+    for (const [batchId, tasks] of batches.entries()) {
+        if (tasks.some((task) => task.autoBatchCanceledAt)) continue;
+
+        const active = tasks.filter((task) => task.status === "queued" || task.status === "running").length;
+        if (active > 0) continue;
+
+        const success = tasks.filter((task) => task.status === "success").length;
+        const targetSuccess = Math.max(...tasks.map((task) => task.autoTargetSuccess ?? 0), 0);
+        const maxAttempts = Math.max(...tasks.map((task) => task.autoMaxAttempts ?? 0), 0);
+        if (!targetSuccess || !maxAttempts || success >= targetSuccess || tasks.length >= maxAttempts) continue;
+
+        const remainingSuccess = targetSuccess - success;
+        const remainingAttempts = maxAttempts - tasks.length;
+        const count = Math.max(0, Math.min(remainingSuccess, remainingAttempts));
+        if (!count) continue;
+
+        const latest = [...tasks].sort((a, b) => String(b.updatedAt || b.createdAt).localeCompare(String(a.updatedAt || a.createdAt)))[0];
+        const latestTime = Date.parse(String(latest.updatedAt || latest.createdAt));
+        if (cutoff && (!Number.isFinite(latestTime) || latestTime < cutoff)) continue;
+
+        const reason = options.reason ?? "startup recovery";
+        appendTaskLog(latest, "system", `auto-register ${reason}: creating ${count} more task(s) for stalled batch ${batchId}`);
+        createRegisterTasks({
+            count,
+            concurrency: taskMaxConcurrency.register,
+            tokenOut: latest.tokenOut,
+            batchId,
+            autoTargetSuccess: targetSuccess,
+            autoMaxAttempts: maxAttempts,
+        });
+        recoveredBatches += 1;
+        recoveredTasks += count;
+    }
+    return {batches: recoveredBatches, tasks: recoveredTasks};
 }
 
 function scheduleRegisterTasks(): void {
@@ -1799,7 +2052,7 @@ function startRegisterTask(task: RuntimeRegisterTask): void {
 
 function createRegisterTasks(body: Record<string, unknown>): RegisterTask[] {
     const count = safeNumber(body.count, 10, 1, 100);
-    const concurrency = safeNumber(body.concurrency, 10, 1, 10);
+    const concurrency = safeNumber(body.concurrency, 10, 1, MAX_TASK_CONCURRENCY);
     const batchId = String(body.batchId ?? "").trim() || makeBatchId();
     const accountId = String(body.accountId ?? "").trim() || undefined;
     const workflowRunId = String(body.workflowRunId ?? "").trim() || undefined;
@@ -1904,6 +2157,146 @@ function buildMicrosoftMailboxUrl(baseUrl: string, email: string, clientId: stri
     url.searchParams.set("num", "2");
     url.searchParams.set("boxType", "1");
     return url.toString();
+}
+
+function getRequestOrigin(req: IncomingMessage): string {
+    const protoHeader = String(req.headers["x-forwarded-proto"] ?? "").split(",")[0].trim();
+    const hostHeader = String(req.headers["x-forwarded-host"] ?? req.headers.host ?? "").split(",")[0].trim();
+    const host = hostHeader || `127.0.0.1:${process.env.PORT || "8788"}`;
+    const proto = protoHeader || "http";
+    return `${proto}://${host}`;
+}
+
+function buildDdgMailboxUrl(origin: string, email: string, mode: DdgMailMode): string {
+    const url = new URL("/api/mail/ddg/latest", origin);
+    url.searchParams.set("email", email);
+    url.searchParams.set("mode", mode);
+    return url.toString();
+}
+
+function isDdgMailEnabled(config = readConfigSync()): boolean {
+    return asBoolean(config.ddgEnabled);
+}
+
+function assertDdgMailReady(config = readConfigSync()): DdgMailMode {
+    const mode = normalizeDdgMode(config.ddgMode);
+    const missing: string[] = [];
+    if (!asString(config.ddgToken)) missing.push("ddgToken");
+    if (mode === "imap") {
+        if (!asString(config.ddgImapEmail)) missing.push("ddgImapEmail");
+        if (!asString(config.ddgImapPassword)) missing.push("ddgImapPassword");
+    } else {
+        if (!asString(config.ddgCfApiBaseUrl)) missing.push("ddgCfApiBaseUrl");
+        if (!asString(config.ddgCfInboxJwt) && !asString(config.ddgCfApiKey)) {
+            missing.push("ddgCfInboxJwt 或 ddgCfApiKey");
+        }
+    }
+    if (missing.length) {
+        throw new Error(`Duck 邮箱已启用，但配置不完整：缺少 ${missing.join(", ")}；请在 OA 页面 Duck 邮箱里补齐配置，或关闭 Duck 开关`);
+    }
+    return mode;
+}
+
+async function createDdgEmailSourceItems(count: number, reason: string): Promise<OaEmailSourceItem[]> {
+    const needed = Math.max(0, Math.floor(count));
+    if (!needed) return [];
+    const config = readConfigSync();
+    if (!isDdgMailEnabled(config)) return [];
+    const mode = assertDdgMailReady(config);
+    const items: OaEmailSourceItem[] = [];
+    console.log(`[duck-mail] generating temporary OA emails count=${needed} mode=${mode} reason=${reason}`);
+    for (let index = 0; index < needed; index += 1) {
+        const mailbox = await createDdgMailbox(mode, config);
+        const mailboxUrl = buildDdgMailboxUrl(currentWebOrigin, mailbox.address, mode);
+        const raw = `${mailbox.address}-----${mailboxUrl}`;
+        items.push({email: mailbox.address, mailboxUrl, raw, kind: "url"});
+        await appendFile(
+            `${oaEmailPoolFile}.history.txt`,
+            `# duck temporary generated at ${new Date().toISOString()} reason=${reason}\n${raw}\n`,
+            "utf8",
+        ).catch(() => undefined);
+    }
+    return items;
+}
+
+function isRemailMailEnabled(config = readConfigSync()): boolean {
+    return isRemailEnabled(config);
+}
+
+async function createRemailSourceItems(count: number, reason: string): Promise<OaEmailSourceItem[]> {
+    const needed = Math.max(0, Math.floor(count));
+    if (!needed) return [];
+    const config = readConfigSync();
+    if (!isRemailMailEnabled(config)) return [];
+    const items: OaEmailSourceItem[] = [];
+    console.log(`[remail] creating temporary OA emails count=${needed} suffix=${asString(config.remailEmailSuffix, "outlook.com")} reason=${reason}`);
+    for (let index = 0; index < needed; index += 1) {
+        const mailbox = await createRemailMailbox(config, currentWebOrigin);
+        const raw = `${mailbox.email}-----${mailbox.mailboxUrl}`;
+        items.push({email: mailbox.email, mailboxUrl: mailbox.mailboxUrl, raw, kind: "url"});
+        await appendFile(
+            `${oaEmailPoolFile}.history.txt`,
+            `# remail temporary generated at ${new Date().toISOString()} reason=${reason} order=${mailbox.orderNo}\n${raw}\n`,
+            "utf8",
+        ).catch(() => undefined);
+    }
+    return items;
+}
+
+async function generateDdgOaEmails(
+    body: Record<string, unknown>,
+    origin: string,
+): Promise<{mode: DdgMailMode; count: number; added: number; updated: number; skipped: number; emails: Array<{email: string; mailboxUrl: string}>}> {
+    const mode = normalizeDdgMode(body.mode ?? body.provider ?? body.type);
+    const count = safeNumber(body.count, 1, 1, 500);
+    const config = readConfigSync();
+    const items: Array<{email: string; mailboxUrl: string}> = [];
+    for (let i = 0; i < count; i += 1) {
+        const mailbox = await createDdgMailbox(mode, config);
+        const mailboxUrl = buildDdgMailboxUrl(origin, mailbox.address, mode);
+        items.push({email: mailbox.address, mailboxUrl});
+    }
+    const imported = await importOaEmails(items.map((item) => `${item.email}-----${item.mailboxUrl}`).join("\n"));
+    return {
+        mode,
+        count: items.length,
+        added: imported.added,
+        updated: imported.updated,
+        skipped: imported.skipped,
+        emails: items,
+    };
+}
+
+async function generateRemailOaEmails(
+    body: Record<string, unknown>,
+    origin: string,
+): Promise<{count: number; added: number; updated: number; skipped: number; emails: Array<{email: string; mailboxUrl: string}>}> {
+    const count = safeNumber(body.count, 1, 1, 500);
+    const config = readConfigSync();
+    const items: Array<{email: string; mailboxUrl: string}> = [];
+    const previousOrigin = currentWebOrigin;
+    currentWebOrigin = origin || currentWebOrigin;
+    try {
+        for (let i = 0; i < count; i += 1) {
+            const mailbox = await createRemailMailbox(config, currentWebOrigin);
+            items.push({email: mailbox.email, mailboxUrl: mailbox.mailboxUrl});
+            await appendFile(
+                `${oaEmailPoolFile}.history.txt`,
+                `# remail manual generated at ${new Date().toISOString()} order=${mailbox.orderNo}\n${mailbox.email}-----${mailbox.mailboxUrl}\n`,
+                "utf8",
+            ).catch(() => undefined);
+        }
+    } finally {
+        currentWebOrigin = previousOrigin;
+    }
+    const imported = await importOaEmails(items.map((item) => `${item.email}-----${item.mailboxUrl}`).join("\n"));
+    return {
+        count: items.length,
+        added: imported.added,
+        updated: imported.updated,
+        skipped: imported.skipped,
+        emails: items,
+    };
 }
 
 function isPlaceholderMailboxUrl(value: string): boolean {
@@ -2329,7 +2722,7 @@ async function createOaSub2ApiTasks(body: Record<string, unknown>): Promise<Regi
 
 async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promise<RegisterTask[]> {
     const target = normalizeOaTarget(body.target ?? body.oaTarget, "sub2api");
-    const concurrency = safeNumber(body.concurrency, 1, 1, 10);
+    const concurrency = safeNumber(body.concurrency, 1, 1, MAX_TASK_CONCURRENCY);
     taskMaxConcurrency["oa-sub2api"] = concurrency;
 
     const ppxy = getPpxyConfig();
@@ -2337,9 +2730,7 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
     const password = String(body.password || "").trim();
     const config = readConfigSync();
     const rawOaProxyUrl = String(body.oaProxyUrl ?? body.openaiProxyUrl ?? body.proxyUrl ?? "").trim();
-    const oaProxyUrl = rawOaProxyUrl.toLowerCase() === "direct"
-        ? ""
-        : rawOaProxyUrl || getOaProxyUrl(config);
+    const oaProxyUrl = rawOaProxyUrl ? normalizeProxyUrl(rawOaProxyUrl) : getOaProxyUrl(config);
     const cpaBaseUrl = String(body.cpaBaseUrl ?? body.cpaUrl ?? asString(config.cliproxyApiBaseUrl)).trim();
     const cpaManagementKey = String(body.cpaManagementKey ?? body.cpaKey ?? asString(config.cliproxyApiManagementKey)).trim();
     if (target === "cpa") {
@@ -2361,7 +2752,14 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
     const selectedEmails = Array.isArray(body.emails)
         ? body.emails.map((item) => String(item).trim().toLowerCase()).filter(Boolean)
         : parseStringList(body.email ?? body.bindEmail ?? body.selectedEmail).map((item) => item.toLowerCase());
-    const allAvailableEmails = (await readOaEmailPool()).filter((item) => {
+    const useRemailSource = isRemailMailEnabled(config) && selectedEmails.length === 0;
+    const useDdgEmailSource = !useRemailSource && isDdgMailEnabled(config) && selectedEmails.length === 0;
+    const directMailboxUrl = String(body.mailboxUrl ?? body.bindMailboxUrl ?? "").trim();
+    const directEmailRaw = String(body.emailRaw ?? body.bindEmailRaw ?? "").trim();
+    const hasDirectEmailSource = selectedEmails.length === 1 && (directMailboxUrl || directEmailRaw);
+    const allAvailableEmails = (useRemailSource || useDdgEmailSource || hasDirectEmailSource)
+        ? []
+        : (await readOaEmailPool()).filter((item) => {
         if (item.available) return true;
         if (!selectedEmails.includes(item.email.toLowerCase())) return false;
         const savedStatus = getOaEmailStatus(item.email);
@@ -2371,9 +2769,18 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
         if (!workflowRunId) return false;
         return savedStatus?.status === "reserved" && savedStatus.taskId === workflowRunId;
     });
-    const emails = selectedEmails.length
+    let emails: OaEmailSourceItem[] = selectedEmails.length
         ? allAvailableEmails.filter((item) => selectedEmails.includes(item.email.toLowerCase()))
         : allAvailableEmails;
+    if (hasDirectEmailSource) {
+        const email = selectedEmails[0];
+        emails = [{
+            email,
+            mailboxUrl: directMailboxUrl,
+            raw: directEmailRaw || `${email}-----${directMailboxUrl}`,
+            kind: directMailboxUrl ? "url" : "hotmail",
+        }];
+    }
     if (selectedEmails.length) {
         const availableEmailSet = new Set(emails.map((item) => item.email.toLowerCase()));
         const missingEmails = selectedEmails.filter((item) => !availableEmailSet.has(item));
@@ -2384,7 +2791,7 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
     if (selectedHashes.length && selectedEmails.length && selectedHashes.length !== selectedEmails.length) {
         throw new Error(`指定号码数量(${selectedHashes.length})与指定邮箱数量(${selectedEmails.length})不一致`);
     }
-    if (!emails.length) throw new Error("没有未绑定可用邮箱；请先导入 邮箱-----接码地址 或 邮箱----密码----clientId----refreshToken");
+    if (!useRemailSource && !useDdgEmailSource && !emails.length) throw new Error("没有未绑定可用邮箱；请先导入 邮箱-----接码地址 或 邮箱----密码----clientId----refreshToken");
 
     const activeTokenAssignments = getActiveOaTokenAssignments();
     const tokens = await readTokenPool(tokenOut);
@@ -2403,12 +2810,18 @@ async function createOaSub2ApiTasksLocked(body: Record<string, unknown>): Promis
             throw new Error(`指定号码不可用或不存在：${missingHashes.map((item) => item.slice(0, 10)).join(", ")}`);
         }
     }
-    const tokenItems = availableTokenItems
+    const tokenCandidates = availableTokenItems
         .filter((item) => !selectedHashes.length || selectedHashes.includes(item.hash))
-        .slice(0, Math.min(countLimit, emails.length));
-    if (!tokenItems.length) {
+        .slice(0, countLimit);
+    if (!tokenCandidates.length) {
         throw new Error("没有可用的 AT+手机号；请确认 AT 池 token 里能解析 phone_number");
     }
+    if (useRemailSource) {
+        emails = await createRemailSourceItems(tokenCandidates.length, `oa-${target}`);
+    } else if (useDdgEmailSource) {
+        emails = await createDdgEmailSourceItems(tokenCandidates.length, `oa-${target}`);
+    }
+    const tokenItems = tokenCandidates.slice(0, emails.length);
     if (selectedHashes.length && tokenItems.length < selectedHashes.length) {
         throw new Error(`可用邮箱不足：已选 ${selectedHashes.length} 个号码，但只有 ${emails.length} 个可用邮箱`);
     }
@@ -2514,6 +2927,8 @@ async function retryOaTask(task: RuntimeRegisterTask, body: Record<string, unkno
         target: task.oaTarget || "sub2api",
         tokenHashes: [hash],
         emails: [task.bindEmail],
+        mailboxUrl: task.mailboxUrl,
+        emailRaw: task.emailRaw,
         retrySourceTaskId: task.id,
         accountId: task.accountId,
         workflowRunId: task.workflowRunId,
@@ -2569,6 +2984,32 @@ function cancelRegisterTask(task: RuntimeRegisterTask): void {
     }
 }
 
+function cancelRegisterBatch(batchId: string): {batchId: string; matched: number; canceled: number; ids: string[]} {
+    const tasks = Array.from(registerTasks.values())
+        .filter((task) => task.kind === "register" && (task.batchId || "legacy") === batchId);
+    const canceledAt = nowIso();
+    let canceled = 0;
+    const ids: string[] = [];
+
+    for (const task of tasks) {
+        if (task.autoTargetSuccess || task.autoMaxAttempts) {
+            task.autoBatchCanceledAt = canceledAt;
+        }
+        if (task.status === "queued" || task.status === "running") {
+            cancelRegisterTask(task);
+            canceled += 1;
+            ids.push(task.id);
+        } else if (task.autoTargetSuccess || task.autoMaxAttempts) {
+            task.updatedAt = canceledAt;
+            appendTaskLog(task, "system", `batch cancel requested for ${batchId}; auto replenish disabled`);
+        }
+    }
+
+    saveRegisterTasksLater();
+    scheduleRegisterTasks();
+    return {batchId, matched: tasks.length, canceled, ids};
+}
+
 function killProcessTree(child: ChildProcessWithoutNullStreams): void {
     const pid = child.pid;
     if (!pid) {
@@ -2614,7 +3055,7 @@ function tokenInfo(token: string, index: number): Record<string, unknown> {
     const expired = exp ? Date.now() > exp * 1000 : false;
     const trial = atMeta.trial[hash];
     const usableForPlus = !expired && trial?.eligible !== false;
-    const usableForOA = !expired && oaEligible;
+    const usableForOA = oaEligible;
     const riskLevel = expired ? "high" : (!phone || trial?.eligible === false) ? "medium" : "low";
     return {
         index,
@@ -3133,7 +3574,12 @@ async function finalizeWorkflowOaSuccess(workflow: WorkflowRecord, oaTask: Runti
 async function reserveWorkflowEmailLocked(workflow: WorkflowRecord): Promise<string | undefined> {
     if (workflow.oaTaskId || workflow.bindEmail) return workflow.bindEmail;
     if (workflow.target !== "sub2api") return undefined;
-    const [emailItem] = (await readOaEmailPool()).filter((item) => item.available);
+    const config = readConfigSync();
+    const [emailItem] = isRemailMailEnabled(config)
+        ? await createRemailSourceItems(1, `free-workflow-${workflow.runId}`)
+        : isDdgMailEnabled(config)
+            ? await createDdgEmailSourceItems(1, `free-workflow-${workflow.runId}`)
+            : (await readOaEmailPool()).filter((item) => item.available);
     if (!emailItem) throw new Error("no available OA email for free workflow");
     workflow.bindEmail = emailItem.email;
     workflow.bindMailboxUrl = emailItem.mailboxUrl;
@@ -3338,6 +3784,8 @@ async function runPhonePlusOaWorkflow(runId: string): Promise<void> {
                 batchId: workflow.batchId,
                 flowMode: workflow.freeMode ? "free" : "phone-plus-oa",
                 emails: workflow.bindEmail ? [workflow.bindEmail] : undefined,
+                mailboxUrl: workflow.bindMailboxUrl,
+                emailRaw: workflow.bindEmailRaw,
                 password: workflow.options.password,
                 oaProxyUrl: workflow.options.oaProxyUrl,
                 sub2apiGroup: workflow.options.sub2apiGroup,
@@ -3369,20 +3817,29 @@ async function runPhonePlusOaWorkflow(runId: string): Promise<void> {
             },
         });
     } catch (error) {
-        workflow.status = "failed";
-        workflow.error = error instanceof Error ? error.message : String(error);
-        workflow.finishedAt = nowIso();
-        workflowLog(workflow, `workflow failed: ${workflow.error}`);
-        const reservationStatus: OaEmailBindStatus = workflow.registerTaskId && !workflow.oaTaskId ? "canceled" : "failed";
-        await releaseWorkflowEmailReservation(workflow, reservationStatus, workflow.error);
-        if (workflow.accountId) {
-            await accountLedger.appendEvent({
-                type: "WORKFLOW_FAILED",
-                accountId: workflow.accountId,
-                source: "workflow",
-                sourceId: workflow.runId,
-                payload: {error: workflow.error, step: workflow.step},
-            });
+        const message = error instanceof Error ? error.message : String(error);
+        if (workflow.status === "canceled" || message === "workflow canceled") {
+            workflow.status = "canceled";
+            workflow.error = message;
+            workflow.finishedAt = nowIso();
+            workflowLog(workflow, `workflow canceled: ${message}`);
+            await releaseWorkflowEmailReservation(workflow, "canceled", message);
+        } else {
+            workflow.status = "failed";
+            workflow.error = message;
+            workflow.finishedAt = nowIso();
+            workflowLog(workflow, `workflow failed: ${workflow.error}`);
+            const reservationStatus: OaEmailBindStatus = workflow.registerTaskId && !workflow.oaTaskId ? "canceled" : "failed";
+            await releaseWorkflowEmailReservation(workflow, reservationStatus, workflow.error);
+            if (workflow.accountId) {
+                await accountLedger.appendEvent({
+                    type: "WORKFLOW_FAILED",
+                    accountId: workflow.accountId,
+                    source: "workflow",
+                    sourceId: workflow.runId,
+                    payload: {error: workflow.error, step: workflow.step},
+                });
+            }
         }
     } finally {
         workflows.set(workflow.runId, workflow);
@@ -3415,8 +3872,8 @@ async function createPhonePlusOaWorkflow(body: Record<string, unknown>): Promise
         createdAt: now,
         updatedAt: now,
         options: {
-            registerConcurrency: safeNumber(body.registerConcurrency ?? body.concurrency, 1, 1, 10),
-            oaConcurrency: safeNumber(body.oaConcurrency ?? body.concurrency, 1, 1, 10),
+            registerConcurrency: safeNumber(body.registerConcurrency ?? body.concurrency, 1, 1, MAX_TASK_CONCURRENCY),
+            oaConcurrency: safeNumber(body.oaConcurrency ?? body.concurrency, 1, 1, MAX_TASK_CONCURRENCY),
             removeTokenOnPlusSuccess: body.removeTokenOnPlusSuccess === true,
             removeTokenOnOaSuccess: body.removeTokenOnOaSuccess === true || body.removeTokenOnSuccess === true,
             tokenOut: String(body.tokenOut ?? "").trim() || undefined,
@@ -3442,7 +3899,8 @@ async function createFreeWorkflows(body: Record<string, unknown>): Promise<{batc
     const {batchId, workflowsCreated, availableEmails} = await withOaTaskCreateLock(async () => {
         const count = safeNumber(body.count, 1, 1, 100);
         const batchId = String(body.batchId ?? "").trim() || makeBatchId();
-        const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
+        const apiEmailSourceEnabled = isRemailMailEnabled() || isDdgMailEnabled();
+        const availableEmails = apiEmailSourceEnabled ? count : (await readOaEmailPool()).filter((item) => item.available).length;
         if (availableEmails < count) {
             throw new Error(`available OA emails not enough: need ${count}, got ${availableEmails}`);
         }
@@ -3514,6 +3972,35 @@ function publicFreeAutoBatch(batch: FreeAutoBatchRecord): FreeAutoBatchRecord {
     return {...batch, logs: batch.logs.slice(-200)};
 }
 
+async function cancelWorkflowCascade(workflow: WorkflowRecord, reason: string): Promise<void> {
+    workflow.status = "canceled";
+    workflow.finishedAt = nowIso();
+    workflowLog(workflow, reason);
+    for (const taskId of [workflow.registerTaskId, workflow.oaTaskId].filter(Boolean)) {
+        const task = registerTasks.get(taskId as string);
+        if (task && (task.status === "queued" || task.status === "running")) {
+            cancelRegisterTask(task);
+        }
+    }
+    await releaseWorkflowEmailReservation(workflow, "canceled", reason);
+}
+
+async function cancelFreeAutoBatch(batch: FreeAutoBatchRecord): Promise<FreeAutoBatchRecord> {
+    batch.status = "canceled";
+    batch.finishedAt = nowIso();
+    freeAutoLog(batch, "manual cancel requested");
+    for (const workflow of getFreeAutoBatchWorkflows(batch.batchId)) {
+        if (isActiveWorkflowStatus(workflow.status)) {
+            await cancelWorkflowCascade(workflow, "batch cancel requested");
+        }
+    }
+    refreshFreeAutoBatchCounts(batch);
+    await saveWorkflows();
+    await saveFreeAutoBatches();
+    scheduleRegisterTasks();
+    return batch;
+}
+
 async function replenishFreeAutoBatch(batchId: string): Promise<FreeAutoBatchRecord | undefined> {
     const workflowRunIdsToStart: string[] = [];
     const batch = await withOaTaskCreateLock(async () => {
@@ -3541,8 +4028,9 @@ async function replenishFreeAutoBatch(batchId: string): Promise<FreeAutoBatchRec
             return record;
         }
 
-        const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
-        const createCount = Math.min(countToCreate, availableEmails);
+        const apiEmailSourceEnabled = isRemailMailEnabled() || isDdgMailEnabled();
+        const availableEmails = apiEmailSourceEnabled ? countToCreate : (await readOaEmailPool()).filter((item) => item.available).length;
+        const createCount = apiEmailSourceEnabled ? countToCreate : Math.min(countToCreate, availableEmails);
         if (!createCount) {
             record.error = `available OA emails not enough for free auto replenish: need ${countToCreate}, got ${availableEmails}`;
             freeAutoLog(record, record.error);
@@ -3610,16 +4098,17 @@ async function createFreeAutoBatch(body: Record<string, unknown>): Promise<{batc
     const targetSuccess = safeNumber(body.targetSuccess, 10, 1, 100);
     const maxAttempts = safeNumber(body.maxAttempts, Math.max(targetSuccess * 2, targetSuccess), targetSuccess, 300);
     const initialCount = safeNumber(body.count ?? body.initialCount, Math.min(targetSuccess, maxAttempts), 1, Math.min(100, maxAttempts));
-    const registerConcurrency = safeNumber(body.registerConcurrency ?? body.concurrency, initialCount, 1, 10);
-    const oaConcurrency = safeNumber(body.oaConcurrency ?? body.concurrency, registerConcurrency, 1, 10);
+    const registerConcurrency = safeNumber(body.registerConcurrency ?? body.concurrency, initialCount, 1, MAX_TASK_CONCURRENCY);
+    const oaConcurrency = safeNumber(body.oaConcurrency ?? body.concurrency, registerConcurrency, 1, MAX_TASK_CONCURRENCY);
     const batchId = String(body.batchId ?? "").trim() || makeBatchId("free_auto");
     if (freeAutoBatches.has(batchId)) {
         throw new Error(`free auto batch already exists: ${batchId}`);
     }
 
-    const availableEmails = (await readOaEmailPool()).filter((item) => item.available).length;
+    const apiEmailSourceEnabled = isRemailMailEnabled() || isDdgMailEnabled();
+    const availableEmails = apiEmailSourceEnabled ? Math.min(initialCount, targetSuccess, maxAttempts) : (await readOaEmailPool()).filter((item) => item.available).length;
     const firstWave = Math.min(initialCount, targetSuccess, maxAttempts);
-    if (availableEmails < firstWave) {
+    if (!apiEmailSourceEnabled && availableEmails < firstWave) {
         throw new Error(`available OA emails not enough: need ${firstWave}, got ${availableEmails}`);
     }
 
@@ -3990,6 +4479,8 @@ function getRegisterBatchSummaries(): Array<Record<string, unknown>> {
         const targetSuccess = Math.max(...tasks.map((task) => task.autoTargetSuccess ?? 0), 0);
         const maxAttempts = Math.max(...tasks.map((task) => task.autoMaxAttempts ?? 0), 0);
         const done = (statuses.running ?? 0) === 0 && (statuses.queued ?? 0) === 0;
+        const canceledByUser = tasks.some((task) => Boolean(task.autoBatchCanceledAt));
+        const freeAuto = freeAutoBatches.has(batchId);
         return {
             batchId,
             count: tasks.length,
@@ -4002,6 +4493,9 @@ function getRegisterBatchSummaries(): Array<Record<string, unknown>> {
             targetSuccess: targetSuccess || undefined,
             maxAttempts: maxAttempts || undefined,
             targetReached: targetSuccess ? (statuses.success ?? 0) >= targetSuccess : undefined,
+            canceledByUser,
+            freeAuto,
+            freeAutoStatus: freeAutoBatches.get(batchId)?.status,
             done,
             createdAt: first?.createdAt ?? "",
             updatedAt: last?.updatedAt ?? "",
@@ -4195,11 +4689,7 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
             return;
         }
         if (method === "POST" && action === "cancel") {
-            batch.status = "canceled";
-            batch.finishedAt = nowIso();
-            freeAutoLog(batch, "manual cancel requested");
-            await saveFreeAutoBatches();
-            sendJson(res, 200, {batch: publicFreeAutoBatch(batch)});
+            sendJson(res, 200, {batch: publicFreeAutoBatch(await cancelFreeAutoBatch(batch))});
             return;
         }
     }
@@ -4332,6 +4822,18 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
+    if ((method === "PATCH" || method === "POST") && pathname === "/api/config/ddg-mail") {
+        const body = await readJsonBody(req);
+        sendJson(res, 200, await updateDdgMailConfig(body));
+        return;
+    }
+
+    if ((method === "PATCH" || method === "POST") && pathname === "/api/config/remail") {
+        const body = await readJsonBody(req);
+        sendJson(res, 200, await updateRemailConfig(body));
+        return;
+    }
+
     if ((method === "PATCH" || method === "POST") && pathname === "/api/config/oa-proxy") {
         const body = await readJsonBody(req);
         sendJson(res, 200, await updateOaProxyConfig(body));
@@ -4340,6 +4842,45 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
 
     if (method === "GET" && pathname === "/api/oa/probe") {
         sendJson(res, 200, await probeOpenAiAuth(url.searchParams));
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/mail/ddg/latest") {
+        try {
+            const email = String(url.searchParams.get("email") ?? "").trim();
+            if (!email) throw new Error("missing email");
+            const mode = normalizeDdgMode(url.searchParams.get("mode"));
+            const minTimestampMs = Number(url.searchParams.get("minTimestampMs") ?? 0) || 0;
+            const message = await fetchLatestDdgMessage(email, mode, readConfigSync(), {minTimestampMs});
+            sendJson(res, 200, {
+                email,
+                mode,
+                code: message?.verificationCode ?? "",
+                message,
+                status: message ? "ok" : "empty",
+            });
+        } catch (error) {
+            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+        }
+        return;
+    }
+
+    if (method === "GET" && pathname === "/api/mail/remail/latest") {
+        try {
+            const email = String(url.searchParams.get("email") ?? "").trim();
+            const token = String(url.searchParams.get("token") ?? "").trim();
+            if (!email) throw new Error("missing email");
+            if (!token) throw new Error("missing token");
+            const message = await fetchLatestRemailMessage(readConfigSync(), email, token);
+            sendJson(res, 200, {
+                email,
+                code: message.code,
+                message: message.raw,
+                status: message.code ? "ok" : "empty",
+            });
+        } catch (error) {
+            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+        }
         return;
     }
 
@@ -4359,8 +4900,8 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         return;
     }
 
-    const registerBatchMatch = pathname.match(/^\/api\/register\/batches\/([^/]+)$/);
-    if (registerBatchMatch && method === "GET") {
+    const registerBatchMatch = pathname.match(/^\/api\/register\/batches\/([^/]+)(?:\/(cancel|resume))?$/);
+    if (registerBatchMatch && method === "GET" && !registerBatchMatch[2]) {
         const batchId = decodeURIComponent(registerBatchMatch[1]);
         const batch = getRegisterBatchSummary(batchId);
         if (!batch) {
@@ -4370,6 +4911,34 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         sendJson(res, 200, {
             batch,
             tasks: Array.from(registerTasks.values()).filter((task) => task.kind === "register" && task.batchId === batchId).map(publicTask).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+        });
+        return;
+    }
+    if (registerBatchMatch && method === "POST" && registerBatchMatch[2] === "cancel") {
+        const batchId = decodeURIComponent(registerBatchMatch[1]);
+        const batch = getRegisterBatchSummary(batchId);
+        if (!batch) {
+            sendJson(res, 404, {error: "batch not found"});
+            return;
+        }
+        const result = cancelRegisterBatch(batchId);
+        sendJson(res, 200, {
+            batch: getRegisterBatchSummary(batchId),
+            result,
+        });
+        return;
+    }
+    if (registerBatchMatch && method === "POST" && registerBatchMatch[2] === "resume") {
+        const batchId = decodeURIComponent(registerBatchMatch[1]);
+        const batch = getRegisterBatchSummary(batchId);
+        if (!batch) {
+            sendJson(res, 404, {error: "batch not found"});
+            return;
+        }
+        const result = replenishStalledAutoRegisterBatches({batchId, reason: "manual resume"});
+        sendJson(res, 200, {
+            batch: getRegisterBatchSummary(batchId),
+            result,
         });
         return;
     }
@@ -4466,6 +5035,26 @@ async function handleApi(req: IncomingMessage, res: ServerResponse, url: URL): P
         try {
             const body = await readJsonBody(req);
             sendJson(res, 200, await rebaseOaEmailMailboxUrls(String(body.mailApiBaseUrl ?? body.baseUrl ?? "")));
+        } catch (error) {
+            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+        }
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/oa/emails/duck/generate") {
+        try {
+            const body = await readJsonBody(req);
+            sendJson(res, 200, await generateDdgOaEmails(body, getRequestOrigin(req)));
+        } catch (error) {
+            sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
+        }
+        return;
+    }
+
+    if (method === "POST" && pathname === "/api/oa/emails/remail/generate") {
+        try {
+            const body = await readJsonBody(req);
+            sendJson(res, 200, await generateRemailOaEmails(body, getRequestOrigin(req)));
         } catch (error) {
             sendJson(res, 400, {error: error instanceof Error ? error.message : String(error)});
         }
@@ -4702,6 +5291,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse): Promise
 
 async function main(): Promise<void> {
     await loadStores();
+    replenishStalledAutoRegisterBatches({maxAgeMs: 24 * 60 * 60 * 1000, reason: "startup recovery"});
     for (const batch of freeAutoBatches.values()) {
         if (batch.status === "running") {
             maybeReplenishFreeAutoBatch(batch.batchId);
@@ -4713,6 +5303,7 @@ async function main(): Promise<void> {
         void handleRequest(req, res);
     });
     const port = await listenWithFallback(server, host, preferredPort, Boolean(process.env.PORT));
+    currentWebOrigin = `http://${host}:${port}`;
     console.log(`web server listening: http://${host}:${port}/`);
     console.log(`register page: http://${host}:${port}/register`);
     console.log(`plus page: http://${host}:${port}/plus`);

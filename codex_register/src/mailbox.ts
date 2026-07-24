@@ -1,6 +1,7 @@
 import {appConfig, type MailProviderName} from "./config.js";
 import {create2925Provider} from "./mail/2925.js";
 import {createCloudflareProvider} from "./mail/cloudflare.js";
+import {createDdgCfProvider, createDdgImapProvider} from "./mail/ddg.js";
 import {createGmailProvider} from "./mail/gmail.js";
 import {createGPTMailProvider} from "./mail/gptmail.js";
 import {createHotmailProvider} from "./mail/hotmail.js";
@@ -31,6 +32,10 @@ function createProvider(): EmailCodeProvider {
       return create2925Provider();
     case "cloudflare":
       return createCloudflareProvider();
+    case "ddg_mail":
+      return createDdgCfProvider();
+    case "imap_mail":
+      return createDdgImapProvider();
     default:
       throw new Error(`不支持的邮箱 provider: ${MAILBOX_CONFIG.provider}`);
   }

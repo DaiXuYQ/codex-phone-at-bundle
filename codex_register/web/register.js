@@ -13,6 +13,7 @@ let taskStatusFilter = "all";
 let agentSummaryCache = null;
 let registerBatchesCache = [];
 let registerView = "tasks";
+const MAX_TASK_CONCURRENCY = 20;
 
 const SMS_COUNTRY_FALLBACK = [
   {code: 33, nameZh: "哥伦比亚", nameEn: "Colombia"},
@@ -176,15 +177,22 @@ function renderAgentDashboard(summary, batches) {
     ? registerBatchesCache.slice(0, 8).map((batch) => {
         const target = batch.targetSuccess ? `\u76ee\u6807 ${batch.success || 0}/${batch.targetSuccess}` : `${batch.success || 0} \u6210\u529f`;
         const statusClass = batch.targetReached ? "success" : batch.done ? "done" : "running";
+        const batchId = batch.batchId || "legacy";
+        const canceledByUser = batch.canceledByUser || batch.freeAutoStatus === "canceled";
+        const canCancel = Number(batch.running || 0) > 0
+          || Number(batch.queued || 0) > 0
+          || (batch.targetSuccess && !batch.targetReached && !batch.done && !canceledByUser);
+        const statusLabel = canceledByUser ? "\u5df2\u53d6\u6d88" : (batch.done ? "\u5df2\u7ed3\u675f" : "\u8fdb\u884c\u4e2d");
         return `
           <div class="batch-item ${statusClass}">
             <div class="batch-main">
-              <strong class="mono">${escapeHtml(batch.batchId || "legacy")}</strong>
+              <strong class="mono">${escapeHtml(batchId)}</strong>
               <span>${escapeHtml(target)} &middot; ${Number(batch.failed || 0)} \u5931\u8d25 &middot; ${Number(batch.running || 0)} \u8fd0\u884c &middot; ${Number(batch.queued || 0)} \u6392\u961f</span>
             </div>
             <div class="batch-actions">
-              <small>${batch.done ? "\u5df2\u7ed3\u675f" : "\u8fdb\u884c\u4e2d"}</small>
-              <button class="small" type="button" data-batch-filter="${escapeHtml(batch.batchId || "legacy")}">\u770b\u4efb\u52a1</button>
+              <small>${statusLabel}</small>
+              <button class="small" type="button" data-batch-filter="${escapeHtml(batchId)}">\u770b\u4efb\u52a1</button>
+              ${canCancel ? `<button class="danger small" type="button" data-batch-cancel="${escapeHtml(batchId)}">\u53d6\u6d88</button>` : ""}
             </div>
           </div>
         `;
@@ -197,6 +205,9 @@ function renderAgentDashboard(summary, batches) {
       renderBatchTaskModal(batchId);
     });
   });
+  document.querySelectorAll("[data-batch-cancel]").forEach((button) => {
+    button.addEventListener("click", () => cancelBatch(button.dataset.batchCancel).catch((error) => toast(error.message)));
+  });
 }
 
 async function loadAgentDashboard() {
@@ -205,6 +216,23 @@ async function loadAgentDashboard() {
     api("/api/register/batches"),
   ]);
   renderAgentDashboard(summary, batchData.batches || []);
+}
+
+async function cancelBatch(batchId) {
+  const normalizedBatchId = batchId || "legacy";
+  const batch = registerBatchesCache.find((item) => (item.batchId || "legacy") === normalizedBatchId);
+  const activeCount = Number(batch?.running || 0) + Number(batch?.queued || 0);
+  const ok = window.confirm(`确认取消批次 ${normalizedBatchId}？\n\n将取消 ${activeCount} 个排队/运行中的任务；自动补位批次会停止继续补任务。`);
+  if (!ok) return;
+
+  const isFreeAuto = normalizedBatchId.startsWith("free_auto");
+  const path = isFreeAuto
+    ? `/api/workflows/free-auto/${encodeURIComponent(normalizedBatchId)}/cancel`
+    : `/api/register/batches/${encodeURIComponent(normalizedBatchId)}/cancel`;
+  const data = await api(path, {method: "POST", body: "{}"});
+  const canceled = data.result?.canceled ?? data.batch?.canceledCount ?? 0;
+  toast(`批次已取消，已请求取消 ${canceled} 个任务`);
+  await loadTasks();
 }
 
 function renderSuccessSummary(data) {
@@ -276,6 +304,8 @@ async function loadSmsBalances() {
 function taskRow(task) {
   const token = task.accessTokenPreview
     ? `<span class="mono token-pill">${escapeHtml(task.accessTokenPreview)}</span>`
+    : task.status === "success" && task.missingAccessToken
+      ? '<span class="muted">无 AT</span>'
     : '<span class="muted">-</span>';
   const phone = task.phone ? `<span class="mono">${escapeHtml(task.phone)}</span>` : '<span class="muted">-</span>';
   const cancel = ["queued", "running"].includes(task.status)
@@ -288,9 +318,9 @@ function taskRow(task) {
   const diagnosis = `<button class="ghost small" data-diagnosis="${task.id}">诊断</button>`;
   const successFile = successTextFileForTask(task);
   const successNote = task.status === "success"
-    ? `<div class="task-note success-text">成功结果：${escapeHtml(successFile || task.tokenOut || "")}</div>`
+    ? `<div class="task-note success-text">${task.missingAccessToken ? "注册成功，未记录 AT" : `成功结果：${escapeHtml(successFile || task.tokenOut || "")}`}</div>`
     : "";
-  const note = task.error
+  const note = task.error && !(task.status === "success" && task.missingAccessToken)
     ? `<div class="task-note error-text">${escapeHtml(task.error)}</div>`
     : `<div class="task-note">${escapeHtml(task.title || "")}</div>`;
   const flow = flowBadge(task);
@@ -349,6 +379,14 @@ function renderBatchTaskModal(batchId) {
   $("#batch-task-modal-list").innerHTML = items.length
     ? items.map(taskRow).join("")
     : `<tr><td colspan="6"><div class="empty">这个批次暂无任务</div></td></tr>`;
+  const cancelButton = $("#batch-task-cancel");
+  if (cancelButton) {
+    const canceledByUser = batch?.canceledByUser || batch?.freeAutoStatus === "canceled";
+    const canCancel = counts.running > 0
+      || (batch?.targetSuccess && !batch?.targetReached && !batch?.done && !canceledByUser);
+    cancelButton.disabled = !canCancel;
+    cancelButton.dataset.batchCancelModal = normalizedBatchId;
+  }
   modal.classList.remove("hidden");
   bindTableActions($("#batch-task-modal-list"));
 }
@@ -965,7 +1003,7 @@ async function startAutoRegister(event) {
       freeMode: true,
       mode: "free",
       registerConcurrency: body.concurrency,
-      oaConcurrency: Math.max(1, Math.min(10, body.concurrency)),
+      oaConcurrency: Math.max(1, Math.min(MAX_TASK_CONCURRENCY, body.concurrency)),
       tokenOut: $("#tokenOut")?.value?.trim() || body.tokenOut,
       sentinelBrowserProxy: $("#sentinelBrowserProxy")?.value?.trim() || body.sentinelBrowserProxy,
       sentinelBrowserPath: $("#sentinelBrowserPath")?.value?.trim() || body.sentinelBrowserPath,
@@ -1015,7 +1053,7 @@ $("#start-form").addEventListener("submit", async (event) => {
         mode: "free",
         concurrency: body.concurrency,
         registerConcurrency: body.concurrency,
-        oaConcurrency: Math.max(1, Math.min(10, body.concurrency)),
+        oaConcurrency: Math.max(1, Math.min(MAX_TASK_CONCURRENCY, body.concurrency)),
         tokenOut: body.tokenOut,
         sentinelBrowserProxy: body.sentinelBrowserProxy,
         sentinelBrowserPath: body.sentinelBrowserPath,
@@ -1083,6 +1121,10 @@ document.querySelectorAll("[data-close-modal]").forEach((el) => {
 });
 document.querySelectorAll("[data-close-batch-task]").forEach((el) => {
   el.addEventListener("click", closeBatchTaskModal);
+});
+$("#batch-task-cancel")?.addEventListener("click", (event) => {
+  const batchId = event.currentTarget.dataset.batchCancelModal || selectedBatchTaskId;
+  cancelBatch(batchId).catch((error) => toast(error.message));
 });
 document.querySelectorAll("[data-close-settings]").forEach((el) => {
   el.addEventListener("click", closeSettingsModal);

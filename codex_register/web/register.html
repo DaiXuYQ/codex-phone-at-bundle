@@ -45,7 +45,7 @@
             </div>
             <div class="field">
               <label for="concurrency">并发</label>
-              <input id="concurrency" name="concurrency" type="number" min="1" max="10" value="10">
+              <input id="concurrency" name="concurrency" type="number" min="1" max="20" value="10">
             </div>
           </div>
           <div class="field">
@@ -92,7 +92,7 @@
             </div>
             <div class="split">
               <div class="field"><label for="auto-initial-count">&#39318;&#25209;&#25968;&#37327;</label><input id="auto-initial-count" name="count" type="number" min="1" max="100" value="10"></div>
-              <div class="field"><label for="auto-concurrency">&#24182;&#21457;</label><input id="auto-concurrency" name="concurrency" type="number" min="1" max="10" value="10"></div>
+              <div class="field"><label for="auto-concurrency">&#24182;&#21457;</label><input id="auto-concurrency" name="concurrency" type="number" min="1" max="20" value="10"></div>
             </div>
             <div class="free-flow-box">
               <label class="check-row">
@@ -232,7 +232,10 @@
 
           </div>
 
-          <button class="ghost icon-btn" type="button" data-close-batch-task>×</button>
+          <div class="row">
+            <button id="batch-task-cancel" class="danger small" type="button">取消批次</button>
+            <button class="ghost icon-btn" type="button" data-close-batch-task>×</button>
+          </div>
 
         </div>
 
